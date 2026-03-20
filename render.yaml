@@ -1,0 +1,44 @@
+services:
+  # ── Headless Telegram bot (Background Worker) ──────────────────────────────
+  # Runs the agent 24/7 as a Render Background Worker — no public port needed.
+  # The bot communicates via Telegram long-polling (outbound only), so no
+  # inbound HTTP is required and a Background Worker is the right Render type.
+  #
+  # To deploy:
+  #   1. Push this repo to GitHub.
+  #   2. Create a new Background Worker in Render, point it at this repo.
+  #   3. Set the environment variables listed below in the Render dashboard.
+  #
+  - type: worker
+    name: deepagents-telegram-bot
+    runtime: docker
+    dockerfilePath: Dockerfile.render
+    # startCommand overrides the Dockerfile CMD — leave commented to use the default.
+    # startCommand: python deploy/telegram_bot.py
+
+    # ── Disk (optional but recommended) ───────────────────────────────────────
+    # Uncomment to add a 1 GB persistent disk so session history, cron jobs,
+    # and the workspace .venv survive service restarts.
+    # disk:
+    #   name: deepagents-data
+    #   mountPath: /root/.deepagents
+    #   sizeGB: 1
+
+    # ── Environment variables ─────────────────────────────────────────────────
+    # Set SECRET values in the Render dashboard (never commit them here).
+    # Non-secret defaults can be listed here with envVarGroups or inline.
+    envVars:
+      - key: DA_MODEL
+        value: anthropic:claude-sonnet-4-6
+      - key: DA_AUTO_APPROVE
+        value: "1"
+      - key: DA_ENABLE_SHELL
+        value: "0"
+      # Secrets — set these in the Render dashboard:
+      # - key: BOT_TOKEN
+      # - key: ANTHROPIC_API_KEY   (or OPENAI_API_KEY / GOOGLE_API_KEY)
+      # - key: TELEGRAM_AI_OWNER_CHAT_ID
+      # - key: MEM0_API_KEY
+      # - key: ASTRA_DB_API_KEY
+      # - key: ASTRA_DB_ENDPOINT
+      # - key: ASTRA_DB_KEYSPACE

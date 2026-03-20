@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
@@ -124,6 +125,29 @@ def _validate_server_config(server_name: str, server_config: dict[str, Any]) -> 
         raise ValueError(error_msg)
 
 
+def _expand_env_vars(obj: Any) -> Any:
+    """Recursively expand ${VAR} placeholders using environment variables."""
+
+    def _expand_str(s: str) -> str:
+        # Only substitute ${VAR} patterns
+        import re
+
+        pattern = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
+
+        def repl(match: re.Match[str]) -> str:
+            return os.environ.get(match.group(1), "")
+
+        return pattern.sub(repl, s)
+
+    if isinstance(obj, str):
+        return _expand_str(obj)
+    if isinstance(obj, dict):
+        return {k: _expand_env_vars(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_env_vars(v) for v in obj]
+    return obj
+
+
 def load_mcp_config(config_path: str) -> dict[str, Any]:
     """Load and validate MCP configuration from JSON file.
 
@@ -157,6 +181,9 @@ def load_mcp_config(config_path: str) -> dict[str, Any]:
     except json.JSONDecodeError as e:
         error_msg = f"Invalid JSON in MCP config file: {e.msg}"
         raise json.JSONDecodeError(error_msg, e.doc, e.pos) from e
+
+    # Expand ${VAR} placeholders in all strings (e.g., API keys in headers)
+    config = _expand_env_vars(config)
 
     # Validate required fields
     if "mcpServers" not in config:

@@ -1,6 +1,7 @@
 """Tests for model_config module."""
 
 import logging
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
@@ -21,12 +22,14 @@ from deepagents_cli.model_config import (
     _load_provider_profiles,
     _profile_module_from_class_path,
     clear_caches,
+    clear_default_agent,
     clear_default_model,
     get_available_models,
     get_model_profiles,
     has_provider_credentials,
     is_warning_suppressed,
     load_thread_columns,
+    save_default_agent,
     save_recent_model,
     save_thread_columns,
     suppress_warning,
@@ -160,6 +163,32 @@ updated_at = false
             "thread_id": True,
             "updated_at": False,
         }
+
+
+class TestDefaultAgentPersistence:
+    """Tests for persisting a default agent in config.toml."""
+
+    def test_save_and_load_default_agent(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        assert save_default_agent("telegram", config_path)
+
+        # Ensure the value is stored in the expected section
+        import tomllib
+
+        with config_path.open("rb") as f:
+            data = tomllib.load(f)
+        assert data["agents"]["default"] == "telegram"
+
+    def test_clear_default_agent(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        config_path.write_text('[agents]\ndefault = "telegram"\n')
+
+        assert clear_default_agent(config_path)
+        import tomllib
+
+        with config_path.open("rb") as f:
+            data = tomllib.load(f)
+        assert "default" not in data.get("agents", {})
 
 
 class TestThreadRelativeTimePersistence:
@@ -497,6 +526,10 @@ models = ["llama3"]
         assert config.providers == {}
         assert any("invalid TOML syntax" in r.message for r in caplog.records)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows does not reliably enforce chmod(0) for unreadable files",
+    )
     def test_unreadable_file_returns_empty_config(self, tmp_path, caplog):
         """Unreadable config file returns empty config and logs a warning."""
         config_path = tmp_path / "config.toml"
@@ -2085,7 +2118,7 @@ class TestGetBuiltinProviders:
         had_builtin = hasattr(base_module, "_BUILTIN_PROVIDERS")
         if had_builtin:
             saved = base_module._BUILTIN_PROVIDERS
-            delattr(base_module, "_BUILTIN_PROVIDERS")
+            del base_module._BUILTIN_PROVIDERS
 
         try:
             with patch.object(base_module, "_SUPPORTED_PROVIDERS", legacy, create=True):

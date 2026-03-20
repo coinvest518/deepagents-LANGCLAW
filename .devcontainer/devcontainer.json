@@ -1,0 +1,23 @@
+{
+  "name": "deepagents-dev",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+  "remoteUser": "vscode",
+  "postCreateCommand": "python -m pip install --upgrade pip setuptools wheel && pip install -e libs/deepagents && pip install -e libs/cli",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-vscode-remote.remote-containers"
+      ]
+    }
+  },
+  "features": {},
+  "forwardPorts": [],
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached"
+  ]
+}

@@ -12,24 +12,24 @@ _tavily_client: TavilyClient | object | None = _UNSET
 
 
 def _get_tavily_client() -> TavilyClient | None:
-    """Get or initialize the lazy Tavily client singleton.
-
-    Returns:
-        TavilyClient instance, or None if API key is not configured.
-    """
-    global _tavily_client  # noqa: PLW0603  # Module-level cache requires global statement
-    if _tavily_client is not _UNSET:
-        return _tavily_client  # type: ignore[return-value]  # narrowed by sentinel check
-
+    """Get or initialize the lazy Tavily client singleton."""
     from deepagents_cli.config import settings
 
-    if settings.has_tavily:
-        from tavily import TavilyClient as _TavilyClient
+    global _tavily_client
+    if _tavily_client is not _UNSET:
+        return _tavily_client  # type: ignore[return-value]
 
-        _tavily_client = _TavilyClient(api_key=settings.tavily_api_key)
+    if getattr(settings, "has_tavily", False):
+        try:
+            from tavily import TavilyClient as _TavilyClient
+
+            _tavily_client = _TavilyClient(api_key=settings.tavily_api_key)
+        except Exception:
+            _tavily_client = None
     else:
         _tavily_client = None
-    return _tavily_client
+
+    return _tavily_client  # type: ignore[return-value]
 
 
 def http_request(
@@ -101,83 +101,62 @@ def http_request(
         }
 
 
-def web_search(  # noqa: ANN201  # Return type depends on dynamic tool configuration
+def web_search(  # noqa: ANN201 - Tavily-first web search adapter
     query: str,
     max_results: int = 5,
     topic: Literal["general", "news", "finance"] = "general",
     include_raw_content: bool = False,
+    *,
+    fallback_to_hyperbrowser: bool = True,
+    session_params: dict | None = None,
+    crawl_params: dict | None = None,
 ):
-    """Search the web using Tavily for current information and documentation.
+    """Simplified web search that uses the Tavily provider wrapper exclusively.
 
-    This tool searches the web and returns relevant results. After receiving results,
-    you MUST synthesize the information into a natural, helpful response for the user.
-
-    Args:
-        query: The search query (be specific and detailed)
-        max_results: Number of results to return (default: 5)
-        topic: Search topic type - "general" for most queries, "news" for current events
-        include_raw_content: Include full page content (warning: uses more tokens)
-
-    Returns:
-        Dictionary containing:
-        - results: List of search results, each with:
-            - title: Page title
-            - url: Page URL
-            - content: Relevant excerpt from the page
-            - score: Relevance score (0-1)
-        - query: The original search query
-
-    IMPORTANT: After using this tool:
-    1. Read through the 'content' field of each result
-    2. Extract relevant information that answers the user's question
-    3. Synthesize this into a clear, natural language response
-    4. Cite sources by mentioning the page titles or URLs
-    5. NEVER show the raw JSON to the user - always provide a formatted response
+    Returns a normalized dict with `results` and `query`, or an `error` key.
     """
-    try:
-        import requests
-        from tavily import (
-            BadRequestError,
-            InvalidAPIKeyError,
-            MissingAPIKeyError,
-            UsageLimitExceededError,
-        )
-        from tavily.errors import ForbiddenError, TimeoutError as TavilyTimeoutError
-    except ImportError as exc:
-        return {
-            "error": f"Required package not installed: {exc.name}. "
-            "Install with: pip install 'deepagents[cli]'",
-            "query": query,
-        }
+    import re
 
-    client = _get_tavily_client()
-    if client is None:
-        return {
-            "error": "Tavily API key not configured. "
-            "Please set TAVILY_API_KEY environment variable.",
-            "query": query,
-        }
+    # Parse optional site:domain from the query
+    site_domain: str | None = None
+    stripped_query = query
+    m = re.search(r"\bsite:([\w\.-]+)\b", query)
+    if m:
+        site_domain = m.group(1)
+        stripped_query = re.sub(r"\bsite:[\w\.-]+\b", "", query).strip()
 
+    # Call the Tavily provider wrapper
     try:
-        return client.search(
-            query,
+        from deepagents_cli.providers import tavily as tavily_provider
+        out = tavily_provider.search(
+            stripped_query or query,
             max_results=max_results,
             include_raw_content=include_raw_content,
             topic=topic,
+            site_domain=site_domain,
+            session_params=session_params,
+            crawl_params=crawl_params,
         )
-    except (
-        requests.exceptions.RequestException,
-        ValueError,
-        TypeError,
-        # Tavily-specific exceptions
-        BadRequestError,
-        ForbiddenError,
-        InvalidAPIKeyError,
-        MissingAPIKeyError,
-        TavilyTimeoutError,
-        UsageLimitExceededError,
-    ) as e:
-        return {"error": f"Web search error: {e!s}", "query": query}
+    except Exception as e:
+        return {"error": f"Tavily web search failed: {e!s}", "query": query}
+
+    # Normalize and score outputs from the provider, producing a consistent
+    # structure the agents can consume: {results: [{title,url,content,score,raw},...], query: str}
+    try:
+        normalized = normalize_and_score_results(out, query=query, site_domain=site_domain, max_results=max_results)
+        # If no results from Tavily and hyperbrowser fallback is enabled, try HyperBrowser for site-scoped queries
+        if (not normalized.get("results")) and site_domain and fallback_to_hyperbrowser:
+            try:
+                from deepagents_cli.providers import hyperbrowser as hb
+
+                hb_out = hb.search_site(site_domain, query=stripped_query or query, max_results=max_results)
+                if hb_out:
+                    normalized = normalize_and_score_results(hb_out, query=query, site_domain=site_domain, max_results=max_results)
+            except Exception:
+                pass
+        return normalized
+    except Exception as e:
+        return {"error": f"Normalization failed: {e!s}", "query": query}
 
 
 def fetch_url(url: str, timeout: int = 30) -> dict[str, Any]:
@@ -234,3 +213,131 @@ def fetch_url(url: str, timeout: int = 30) -> dict[str, Any]:
         }
     except requests.exceptions.RequestException as e:
         return {"error": f"Fetch URL error: {e!s}", "url": url}
+
+
+def hyperbrowser_scrape(site_domain: str, *, query: str | None = None, max_results: int = 5) -> dict[str, Any]:
+    """Run a HyperBrowser scrape for a site and return normalized results.
+
+    This is a thin wrapper around `deepagents_cli.providers.hyperbrowser.search_site`
+    to expose HyperBrowser as a first-class tool for agents.
+    """
+    try:
+        from deepagents_cli.providers import hyperbrowser as hb
+
+        out = hb.search_site(site_domain, query=query, max_results=max_results)
+        return normalize_and_score_results(out, query=query or f"site:{site_domain}", site_domain=site_domain, max_results=max_results)
+    except Exception as e:
+        return {"error": f"HyperBrowser scrape failed: {e!s}", "query": query or f"site:{site_domain}"}
+
+
+def firecrawl_scrape(site_domain: str, *, query: str | None = None, max_results: int = 5) -> dict[str, Any]:
+    """Run a Firecrawl search scoped to a site and return normalized results.
+
+    Thin wrapper around `deepagents_cli.providers.firecrawl.search` to expose
+    Firecrawl as a first-class tool for agents. Returns normalized output via
+    `normalize_and_score_results` on success or an error dict on failure.
+    """
+    try:
+        from deepagents_cli.providers import firecrawl as fc
+
+        out = fc.search(query or "", max_results=max_results, site_domain=site_domain)
+        return normalize_and_score_results(out, query=query or f"site:{site_domain}", site_domain=site_domain, max_results=max_results)
+    except Exception as e:
+        return {"error": f"Firecrawl search failed: {e!s}", "query": query or f"site:{site_domain}"}
+
+
+def normalize_and_score_results(
+    raw: Any,
+    *,
+    query: str,
+    site_domain: str | None = None,
+    max_results: int = 5,
+) -> dict[str, Any]:
+    """Normalize provider outputs into a consistent list of results and score them.
+
+    The returned shape is:
+    {
+        "query": str,
+        "results": [
+            {"title": str, "url": str, "content": str, "score": float, "raw": Any}
+        ]
+    }
+    """
+    from urllib.parse import urlparse
+
+    def extract_from_item(item: Any) -> dict:
+        if not isinstance(item, dict):
+            text = str(item)
+            return {"title": text[:120], "url": "", "content": text, "raw": item}
+
+        # prefer explicit fields, fall back to common alternatives
+        title = item.get("title") or item.get("name") or item.get("headline") or ""
+        url = item.get("url") or item.get("link") or item.get("href") or item.get("uri") or ""
+        content = (
+            item.get("content")
+            or item.get("snippet")
+            or item.get("excerpt")
+            or item.get("raw_content")
+            or item.get("text")
+            or ""
+        )
+        return {"title": title, "url": url, "content": content, "raw": item}
+
+    items: list[dict] = []
+
+    # Accept dicts with 'results' or 'data' keys, lists, or single dicts
+    if isinstance(raw, dict):
+        if "results" in raw and isinstance(raw["results"], list):
+            candidates = raw["results"]
+        elif "data" in raw and isinstance(raw["data"], dict) and isinstance(raw["data"].get("web"), list):
+            candidates = raw["data"]["web"]
+        elif "raw" in raw:
+            candidates = [raw["raw"]]
+        else:
+            # treat the dict itself as a single item
+            candidates = [raw]
+    elif isinstance(raw, list):
+        candidates = raw
+    else:
+        candidates = [raw]
+
+    for c in candidates:
+        items.append(extract_from_item(c))
+
+    scored: list[dict] = []
+    for it in items:
+        score = 0.0
+        content = it.get("content") or ""
+        title = it.get("title") or ""
+        url = it.get("url") or ""
+
+        # signal if content present and substantial
+        if isinstance(content, str) and len(content) > 200:
+            score += 0.5
+        elif isinstance(content, str) and len(content) > 80:
+            score += 0.25
+
+        # small boost for title presence
+        if title:
+            score += 0.15
+
+        # boost when URL matches requested site_domain
+        try:
+            if site_domain and url:
+                p = urlparse(url)
+                hostname = (p.hostname or "").lower()
+                if site_domain.lower() in hostname:
+                    score += 0.25
+        except Exception:
+            pass
+
+        # clamp
+        score = min(score, 1.0)
+
+        scored.append({"title": title, "url": url, "content": content, "score": round(float(score), 3), "raw": it.get("raw")})
+
+    # sort by score desc and trim
+    scored.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+    top = scored[: max(0, int(max_results))]
+
+    return {"query": query, "results": top}

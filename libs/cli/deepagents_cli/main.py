@@ -18,6 +18,7 @@ import logging
 import os
 import shutil
 import sys
+import threading
 import traceback
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -402,6 +403,43 @@ def parse_args() -> argparse.Namespace:
     add_json_output_arg(threads_delete)
     threads_delete.add_argument("thread_id", help="Thread ID to delete")
 
+    # ── cron subcommand ───────────────────────────────────────────────
+    cron_parser = subparsers.add_parser(
+        "cron",
+        help="Manage and run scheduled autonomous agent tasks",
+        add_help=True,
+    )
+    cron_sub = cron_parser.add_subparsers(dest="cron_command")
+
+    cron_sub.add_parser("list", aliases=["ls"], help="List all cron jobs", add_help=True)
+
+    cron_run_parser = cron_sub.add_parser(
+        "run",
+        help="Run all due cron jobs once and exit",
+        add_help=True,
+    )
+    cron_run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show which jobs would run without actually running them",
+    )
+
+    cron_daemon_parser = cron_sub.add_parser(
+        "daemon",
+        help="Run continuously, executing jobs as they come due (Ctrl-C to stop)",
+        add_help=True,
+    )
+    cron_daemon_parser.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        metavar="SECONDS",
+        help="Poll interval in seconds (default: 60)",
+    )
+
+    cron_delete_parser = cron_sub.add_parser("delete", aliases=["rm"], help="Delete a cron job")
+    cron_delete_parser.add_argument("job_id", help="Job ID to delete (from 'cron list')")
+
     # Default interactive mode — argument order here determines the
     # usage line printed by argparse; keep in sync with ui.show_help().
     parser.add_argument(
@@ -467,6 +505,22 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--default-agent",
+        metavar="NAME",
+        nargs="?",
+        const="__SHOW__",
+        default=None,
+        help="Set the default agent for future launches. "
+        "Use with no argument to show the current default.",
+    )
+
+    parser.add_argument(
+        "--clear-default-agent",
+        action="store_true",
+        help="Clear the default agent setting, returning to the built-in default.",
+    )
+
+    parser.add_argument(
         "-m",
         "--message",
         dest="initial_prompt",
@@ -525,6 +579,7 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+
     parser.add_argument(
         "--sandbox-id",
         metavar="ID",
@@ -535,6 +590,12 @@ def parse_args() -> argparse.Namespace:
         "--sandbox-setup",
         metavar="PATH",
         help="Path to setup script to run in sandbox after creation",
+    )
+
+    parser.add_argument(
+        "--telegram",
+        action="store_true",
+        help="Start the Telegram gateway alongside the CLI (requires BOT_TOKEN).",
     )
     parser.add_argument(
         "-S",
@@ -1049,6 +1110,10 @@ def _check_mcp_project_trust(*, trust_flag: bool = False) -> bool | None:
     return False
 
 
+
+
+
+
 def cli_main() -> None:
     """Entry point for console script."""
     # Fix for gRPC fork issue on macOS
@@ -1087,6 +1152,14 @@ def cli_main() -> None:
 
     try:
         args = parse_args()
+
+        # If the user did not explicitly specify an agent, allow a stored default
+        # agent to override the built-in default and avoid needing to pass -a.
+        from deepagents_cli.model_config import ModelConfig
+
+        config = ModelConfig.load()
+        if args.agent == _DEFAULT_AGENT_NAME and config.default_agent:
+            args.agent = config.default_agent
 
         model_params: dict[str, Any] | None = None
         raw_kwargs = getattr(args, "model_params", None)
@@ -1208,6 +1281,7 @@ def cli_main() -> None:
         if args.default_model is not None:
             from deepagents_cli.model_config import (
                 ModelConfig,
+                ModelSpec,
                 save_default_model,
             )
 
@@ -1222,7 +1296,6 @@ def cli_main() -> None:
             model_spec = args.default_model
             # Auto-detect provider for bare model names
             from deepagents_cli.config import detect_provider
-            from deepagents_cli.model_config import ModelSpec
 
             parsed = ModelSpec.try_parse(model_spec)
             if not parsed:
@@ -1235,6 +1308,43 @@ def cli_main() -> None:
             else:
                 console.print(
                     "[bold red]Error:[/bold red] Could not save default model. "
+                    "Check permissions for ~/.deepagents/"
+                )
+                sys.exit(1)
+            sys.exit(0)
+
+        if args.clear_default_agent:
+            from deepagents_cli.model_config import clear_default_agent
+
+            if clear_default_agent():
+                console.print("Default agent cleared.")
+            else:
+                console.print(
+                    "[bold red]Error:[/bold red] Could not clear default agent. "
+                    "Check permissions for ~/.deepagents/"
+                )
+                sys.exit(1)
+            sys.exit(0)
+
+        if args.default_agent is not None:
+            from deepagents_cli.model_config import (
+                ModelConfig,
+                save_default_agent,
+            )
+
+            if args.default_agent == "__SHOW__":
+                config = ModelConfig.load()
+                if config.default_agent:
+                    console.print(f"Default agent: {config.default_agent}")
+                else:
+                    console.print("No default agent set.")
+                sys.exit(0)
+
+            if save_default_agent(args.default_agent):
+                console.print(f"Default agent set to {args.default_agent}")
+            else:
+                console.print(
+                    "[bold red]Error:[/bold red] Could not save default agent. "
                     "Check permissions for ~/.deepagents/"
                 )
                 sys.exit(1)
@@ -1286,6 +1396,10 @@ def cli_main() -> None:
             else:
                 # No subcommand provided, show threads help screen
                 show_threads_help()
+        elif args.command == "cron":
+            from deepagents_cli.cron_commands import execute_cron_command
+
+            execute_cron_command(args)
         elif args.non_interactive_message:
             # Check for optional tools before running agent (stderr so
             # --quiet piped output stays clean)

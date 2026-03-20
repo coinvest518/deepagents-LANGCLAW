@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -651,6 +652,7 @@ def create_cli_agent(
     enable_memory: bool = True,
     enable_skills: bool = True,
     enable_shell: bool = True,
+    enable_reflection: bool = False,
     checkpointer: BaseCheckpointSaver | None = None,
     mcp_server_info: list[MCPServerInfo] | None = None,
     cwd: str | Path | None = None,
@@ -690,6 +692,9 @@ def create_cli_agent(
         enable_skills: Enable `SkillsMiddleware` for custom agent skills
         enable_shell: Enable shell execution via `LocalShellBackend`
             (only in local mode). When enabled, the `execute` tool is available.
+        enable_reflection: Enable `ReflectionMiddleware` for self-critique on
+            final responses. Adds one extra model call per final answer.
+            Off by default.
         checkpointer: Optional checkpointer for session persistence.
             When `None`, the graph is compiled without a checkpointer.
         mcp_server_info: MCP server metadata to surface in the system prompt.
@@ -898,6 +903,12 @@ def create_cli_agent(
         create_summarization_tool_middleware(model, composite_backend)
     )
 
+    if enable_reflection:
+        from deepagents.middleware.reflection import ReflectionMiddleware
+
+        agent_middleware.append(ReflectionMiddleware())
+        logger.debug("ReflectionMiddleware enabled")
+
     # Create the agent
     #
     # TODO: revert to direct keyword arguments once the CLI pins SDK >=0.5.0.
@@ -916,6 +927,43 @@ def create_cli_agent(
     }
     if async_subagents:
         agent_kwargs["async_subagents"] = async_subagents
+
+    # Auto-wire cloud-backed stores when provider keys are present
+    store = None
+    try:
+        from deepagents.store_adapters import AstraStore, CompositeStore, Mem0Store  # type: ignore
+
+        astra_store = None
+        mem0_store = None
+        if os.environ.get("ASTRA_DB_API_KEY"):
+            try:
+                astra_store = AstraStore.from_env()
+                logger.info("AstraDB store initialized")
+            except Exception:
+                logger.warning("Failed to initialize AstraDB store", exc_info=True)
+        if os.environ.get("MEM0_API_KEY"):
+            try:
+                mem0_store = Mem0Store.from_env()
+                logger.info("Mem0 store initialized")
+            except Exception:
+                logger.warning("Failed to initialize Mem0 store", exc_info=True)
+
+        if astra_store or mem0_store:
+            store = CompositeStore(
+                primary=mem0_store or astra_store,
+                secondary=(astra_store if mem0_store else None),
+            )
+            logger.info(
+                "Composite store active (primary=%s, secondary=%s)",
+                type(mem0_store or astra_store).__name__,
+                type(astra_store).__name__ if mem0_store and astra_store else "none",
+            )
+    except Exception:
+        logger.warning("Failed to initialize cloud stores", exc_info=True)
+        store = None
+
+    if store is not None:
+        agent_kwargs["store"] = store
 
     agent = create_deep_agent(**agent_kwargs).with_config(config)
     return agent, composite_backend

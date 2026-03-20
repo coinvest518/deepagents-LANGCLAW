@@ -554,6 +554,8 @@ class Settings:
     google_api_key: str | None
     nvidia_api_key: str | None
     tavily_api_key: str | None
+    firecrawl_api_key: str | None
+    hyperbrowser_api_key: str | None
 
     # Google Cloud configuration (for VertexAI)
     google_cloud_project: str | None
@@ -589,6 +591,8 @@ class Settings:
         google_key = os.environ.get("GOOGLE_API_KEY") or None
         nvidia_key = os.environ.get("NVIDIA_API_KEY") or None
         tavily_key = os.environ.get("TAVILY_API_KEY") or None
+        firecrawl_key = os.environ.get("FIRECRAWL_API_KEY") or None
+        hyperbrowser_key = os.environ.get("HYPERBROWSER_API_KEY") or None
         google_cloud_project = os.environ.get("GOOGLE_CLOUD_PROJECT")
 
         # Detect LangSmith configuration
@@ -614,6 +618,8 @@ class Settings:
             google_api_key=google_key,
             nvidia_api_key=nvidia_key,
             tavily_api_key=tavily_key,
+            firecrawl_api_key=firecrawl_key,
+            hyperbrowser_api_key=hyperbrowser_key,
             google_cloud_project=google_cloud_project,
             deepagents_langchain_project=deepagents_langchain_project,
             user_langchain_project=user_langchain_project,
@@ -647,6 +653,8 @@ class Settings:
             "google_api_key",
             "nvidia_api_key",
             "tavily_api_key",
+            "firecrawl_api_key",
+            "hyperbrowser_api_key",
         }
         reloadable_fields = (
             "openai_api_key",
@@ -687,6 +695,8 @@ class Settings:
             "google_api_key": os.environ.get("GOOGLE_API_KEY") or None,
             "nvidia_api_key": os.environ.get("NVIDIA_API_KEY") or None,
             "tavily_api_key": os.environ.get("TAVILY_API_KEY") or None,
+            "firecrawl_api_key": os.environ.get("FIRECRAWL_API_KEY") or None,
+            "hyperbrowser_api_key": os.environ.get("HYPERBROWSER_API_KEY") or None,
             "google_cloud_project": os.environ.get("GOOGLE_CLOUD_PROJECT"),
             "deepagents_langchain_project": os.environ.get(
                 "DEEPAGENTS_LANGSMITH_PROJECT"
@@ -760,6 +770,16 @@ class Settings:
     def has_tavily(self) -> bool:
         """Check if Tavily API key is configured."""
         return self.tavily_api_key is not None
+
+    @property
+    def has_firecrawl(self) -> bool:
+        """Check if Firecrawl API key is configured."""
+        return self.firecrawl_api_key is not None
+
+    @property
+    def has_hyperbrowser(self) -> bool:
+        """Check if HyperBrowser API key is configured."""
+        return self.hyperbrowser_api_key is not None
 
     @property
     def user_deepagents_dir(self) -> Path:

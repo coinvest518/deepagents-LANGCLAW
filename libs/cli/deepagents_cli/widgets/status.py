@@ -369,3 +369,24 @@ class StatusBar(Horizontal):
         label = self.query_one("#model-display", ModelLabel)
         label.provider = provider
         label.model = model
+
+    def set_telegram_status(self, status: str) -> None:
+        """Update the Telegram integration status display.
+
+        Args:
+            status: Status string (e.g., "Connected", "Disabled", "Error")
+        """
+        try:
+            # Add a telegram status indicator to the status bar
+            # We'll add it to the left collapsible area
+            with suppress(NoMatches):
+                # Try to find existing telegram status widget
+                telegram_widget = self.query_one("#telegram-status", Static)
+                telegram_widget.update(f"Telegram: {status}")
+                return
+        except NoMatches:
+            pass
+
+        # If no existing widget, we could create one, but for now just log
+        # The status will be shown in the status message area if needed
+        logger.debug("Telegram status: %s", status)

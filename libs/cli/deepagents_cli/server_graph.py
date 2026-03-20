@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import sys
+import threading
 import traceback
 from typing import Any
 
@@ -53,9 +55,10 @@ def _build_tools(
         RuntimeError: If MCP tool loading fails.
     """
     from deepagents_cli.config import settings
+    from deepagents_cli.cron_tools import CRON_TOOLS
     from deepagents_cli.tools import fetch_url, http_request, web_search
 
-    tools: list[Any] = [http_request, fetch_url]
+    tools: list[Any] = [http_request, fetch_url, *CRON_TOOLS]
     if settings.has_tavily:
         tools.append(web_search)
 
@@ -179,6 +182,49 @@ def make_graph() -> Any:  # noqa: ANN401
         project_context=project_context,
         async_subagents=async_subagents,
     )
+    # If the CLI passed Telegram details via env vars, send a non-blocking
+    # startup notification so the operator knows the server came online.
+    # Support both `DA_SERVER_*` (CLI-to-server) and the user's existing
+    # `TELEGRAM_*` env var names as a fallback so local `.env` files work.
+    bot_token = (
+        os.environ.get("DA_SERVER_BOT_TOKEN")
+        or os.environ.get("TELEGRAM_BOT_TOKEN")
+        or os.environ.get("TELEGRAM_YBOT_TOKEN")
+    )
+    chat_id = os.environ.get("DA_SERVER_CHAT_ID") or os.environ.get(
+        "TELEGRAM_AI_OWNER_CHAT_ID"
+    )
+    always_listen = os.environ.get("TELEGRAM_ALWAYS_LISTEN_CHAT_IDS")
+    if bot_token:
+        logger.info("Telegram notifier configured (using provided env vars)")
+    else:
+        logger.debug("No Telegram bot token found in environment")
+
+    def _send_startup_message(token: str, cid: str) -> None:
+        try:
+            import requests
+
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            text = "DeepAgents server started and agent is ready."
+            # Ensure chat_id is safe for URL/JSON usage
+            payload = {"chat_id": cid, "text": text}
+            requests.post(url, json=payload, timeout=10)
+        except Exception:
+            logger.debug("Failed to send Telegram startup message", exc_info=True)
+
+    if bot_token and chat_id:
+        try:
+            t = threading.Thread(
+                target=_send_startup_message, args=(bot_token, chat_id), daemon=True
+            )
+            t.start()
+        except Exception:
+            logger.debug("Could not start Telegram notifier thread", exc_info=True)
+    elif bot_token and not chat_id:
+        logger.warning(
+            "Telegram bot token found but no chat id (DA_SERVER_CHAT_ID or TELEGRAM_AI_OWNER_CHAT_ID)."
+        )
+
     return agent
 
 

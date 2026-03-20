@@ -86,6 +86,23 @@ from deepagents_cli.widgets.welcome import WelcomeBanner
 logger = logging.getLogger(__name__)
 _monotonic = time.monotonic
 
+# Reference to the currently-running DeepAgentsApp instance when the
+# Textual app is started. Other in-process integrations (gateway) use this
+# to forward external inputs into the running UI/agent loop.
+CURRENT_APP: DeepAgentsApp | None = None
+
+# Import Telegram integration if available
+try:
+    from deepagents_cli.telegram_integration import (
+        TelegramIntegration,
+        is_telegram_enabled,
+    )
+
+    _TELEGRAM_AVAILABLE = True
+except ImportError:
+    _TELEGRAM_AVAILABLE = False
+    TelegramIntegration = None  # type: ignore[assignment,misc]
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -620,6 +637,9 @@ class DeepAgentsApp(App):
             **kwargs: Additional arguments passed to parent
         """
         super().__init__(**kwargs)
+        # Expose the running app instance for in-process integrations.
+        global CURRENT_APP  # noqa: PLW0603
+        CURRENT_APP = self
         self._agent = agent
         self._assistant_id = assistant_id
         self._backend = backend
@@ -673,6 +693,8 @@ class DeepAgentsApp(App):
         self._deferred_actions: list[DeferredAction] = []
         # Message virtualization store
         self._message_store = MessageStore()
+        # Pending Telegram reply: chat_id to send the next AI response to
+        self._telegram_reply_chat_id: int | None = None
         # Lazily imported here to avoid pulling image dependencies into
         # argument parsing paths.
         from deepagents_cli.input import MediaTracker
@@ -775,6 +797,22 @@ class DeepAgentsApp(App):
 
         # Focus the input (autocomplete is now built into ChatInput)
         self._chat_input.focus_input()
+
+        # Initialize Telegram integration if available
+        if _TELEGRAM_AVAILABLE and is_telegram_enabled():
+            try:
+                self._telegram_integration = TelegramIntegration(self)
+                self._telegram_integration.start()
+                # Show Telegram status in status bar
+                if self._status_bar:
+                    self._status_bar.set_telegram_status("Connected")
+                logger.info("Telegram integration initialized and started")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to initialize Telegram integration: %s", e)
+                if self._status_bar:
+                    self._status_bar.set_telegram_status("Error")
+        elif self._status_bar:
+            self._status_bar.set_telegram_status("Disabled")
 
         # Warn about missing optional tools (advisory only — never block startup)
         try:
@@ -2343,6 +2381,43 @@ class DeepAgentsApp(App):
                 AppMessage("Agent not configured for this session.")
             )
 
+    async def _handle_external_message(
+        self,
+        message: str,
+        source: str = "external",
+        telegram_chat_id: int | None = None,
+    ) -> None:
+        """Handle messages from external sources (Telegram, etc.).
+
+        Args:
+            message: The message text
+            source: Source identifier for logging
+            telegram_chat_id: If set, the AI response will be sent back to this
+                Telegram chat ID after the agent finishes.
+        """
+        logger.info("External message from %s: %s", source, message[:50])
+
+        if telegram_chat_id is not None:
+            self._telegram_reply_chat_id = telegram_chat_id
+            # Kick off the typing indicator + "Working on it…" placeholder
+            # immediately so the user sees feedback before the agent starts.
+            tg = getattr(self, "_telegram_integration", None)
+            if tg is not None:
+                import asyncio as _asyncio
+
+                # Store ref to prevent GC; task is cancelled by deliver_reply.
+                tg._thinking_task = _asyncio.create_task(
+                    tg._start_thinking(telegram_chat_id)
+                )
+
+        if not self._session_state:
+            await self._mount_message(
+                AppMessage(f"External message from {source}: {message}")
+            )
+            return
+
+        await self._handle_user_message(message)
+
     async def _run_agent_task(self, message: str) -> None:
         """Run the agent task in a background worker.
 
@@ -2923,7 +2998,8 @@ class DeepAgentsApp(App):
         """Sync final message content back to the store after streaming.
 
         Called when streaming finishes so the store holds the full text
-        instead of the empty string captured at mount time.
+        instead of the empty string captured at mount time. Also sends the
+        response back to a pending Telegram chat if one is set.
 
         Args:
             message_id: The ID of the message to update.
@@ -2934,6 +3010,19 @@ class DeepAgentsApp(App):
             content=content,
             is_streaming=False,
         )
+
+        # Deliver reply back to Telegram when a response is ready.
+        # deliver_reply handles formatting (md→HTML), placeholder editing,
+        # message splitting, and fires in a daemon thread — safe to call here.
+        if self._telegram_reply_chat_id is not None and content.strip():
+            chat_id = self._telegram_reply_chat_id
+            self._telegram_reply_chat_id = None
+            tg = getattr(self, "_telegram_integration", None)
+            if tg is not None:
+                try:
+                    tg.deliver_reply(chat_id, content)
+                except Exception:
+                    logger.warning("Failed to deliver Telegram reply", exc_info=True)
 
     async def _clear_messages(self) -> None:
         """Clear the messages area and message store."""

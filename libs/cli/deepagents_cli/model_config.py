@@ -202,6 +202,13 @@ PROVIDER_API_KEY_ENV: dict[str, str] = {
     "perplexity": "PPLX_API_KEY",
     "together": "TOGETHER_API_KEY",
     "xai": "XAI_API_KEY",
+    "apify": "APIFY_API_KEY",
+    "composio": "COMPOSIO_API_KEY",
+    "cerebras": "CEREBRAS_API_KEY",
+    "hyperbrowser": "HYPERBROWSER_API_KEY",
+    "firecrawl": "FIRECRAWL_API_KEY",
+    "astra": "ASTRA_DB_API_KEY",
+    "mem0": "MEM0_API_KEY",
 }
 """Well-known providers mapped to the env var that holds their API key.
 
@@ -734,6 +741,9 @@ class ModelConfig:
     recent_model: str | None = None
     """The most recently switched-to model (from config file `[models].recent`)."""
 
+    default_agent: str | None = None
+    """The user's intentional default agent (from config file `[agents].default`)."""
+
     providers: Mapping[str, ProviderConfig] = field(default_factory=dict)
     """Read-only mapping of provider names to their configurations."""
 
@@ -793,9 +803,11 @@ class ModelConfig:
             return fallback
 
         models_section = data.get("models", {})
+        agents_section = data.get("agents", {})
         config = cls(
             default_model=models_section.get("default"),
             recent_model=models_section.get("recent"),
+            default_agent=agents_section.get("default"),
             providers=models_section.get("providers", {}),
         )
 
@@ -1080,6 +1092,59 @@ def _save_model_field(
         return True
 
 
+def _save_agent_field(
+    field: str, agent_name: str, config_path: Path | None = None
+) -> bool:
+    """Read-modify-write a `[agents].<field>` key in the config file.
+
+    Args:
+        field: Key name under the `[agents]` table (e.g., `'default'`).
+        agent_name: The agent name to save.
+        config_path: Path to config file.
+
+            Defaults to `~/.deepagents/config.toml`.
+
+    Returns:
+        True if save succeeded, False if it failed due to I/O errors.
+    """
+    if config_path is None:
+        config_path = DEFAULT_CONFIG_PATH
+
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Read existing config or start fresh
+        if config_path.exists():
+            with config_path.open("rb") as f:
+                data = tomllib.load(f)
+        else:
+            data = {}
+
+        if "agents" not in data:
+            data["agents"] = {}
+        data["agents"][field] = agent_name
+
+        # Write to temp file then rename to prevent corruption if write is interrupted
+        fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                tomli_w.dump(data, f)
+            Path(tmp_path).replace(config_path)
+        except BaseException:
+            # Clean up temp file on any failure
+            with contextlib.suppress(OSError):
+                Path(tmp_path).unlink()
+            raise
+    except (OSError, tomllib.TOMLDecodeError):
+        logger.exception("Could not save %s agent preference", field)
+        return False
+    else:
+        # Invalidate config cache so the next load() picks up the change.
+        global _default_config_cache  # noqa: PLW0603  # Module-level cache requires global statement
+        _default_config_cache = None
+        return True
+
+
 def save_default_model(model_spec: str, config_path: Path | None = None) -> bool:
     """Update the default model in config file.
 
@@ -1142,6 +1207,75 @@ def clear_default_model(config_path: Path | None = None) -> bool:
             raise
     except (OSError, tomllib.TOMLDecodeError):
         logger.exception("Could not clear default model preference")
+        return False
+    else:
+        global _default_config_cache  # noqa: PLW0603  # Module-level cache requires global statement
+        _default_config_cache = None
+        return True
+
+
+def save_default_agent(agent_name: str, config_path: Path | None = None) -> bool:
+    """Update the default agent in config file.
+
+    Reads existing config (if any), updates `[agents].default`, and writes back
+    using proper TOML serialization.
+
+    Args:
+        agent_name: The agent to set as default.
+        config_path: Path to config file.
+
+            Defaults to `~/.deepagents/config.toml`.
+
+    Returns:
+        True if save succeeded, False if it failed due to I/O errors.
+
+    Note:
+        This function does not preserve comments in the config file.
+    """
+    return _save_agent_field("default", agent_name, config_path)
+
+
+def clear_default_agent(config_path: Path | None = None) -> bool:
+    """Remove the default agent from the config file.
+
+    Deletes the `[agents].default` key so that future launches fall back to
+    the built-in default agent name.
+
+    Args:
+        config_path: Path to config file.
+
+            Defaults to `~/.deepagents/config.toml`.
+
+    Returns:
+        True if the key was removed (or was already absent), False on I/O error.
+    """
+    if config_path is None:
+        config_path = DEFAULT_CONFIG_PATH
+
+    if not config_path.exists():
+        return True  # Nothing to clear
+
+    try:
+        with config_path.open("rb") as f:
+            data = tomllib.load(f)
+
+        agents_section = data.get("agents")
+        if not isinstance(agents_section, dict) or "default" not in agents_section:
+            return True  # Already absent
+
+        del agents_section["default"]
+
+        fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                tomli_w.dump(data, f)
+            Path(tmp_path).replace(config_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                Path(tmp_path).unlink()
+            raise
+    except (OSError, tomllib.TOMLDecodeError):
+        logger.exception("Could not clear default agent preference")
         return False
     else:
         global _default_config_cache  # noqa: PLW0603  # Module-level cache requires global statement

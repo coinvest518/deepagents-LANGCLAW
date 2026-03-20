@@ -999,8 +999,16 @@ class ChatInput(Vertical):
         if is_ascii_mode():
             self.styles.border = ("ascii", "cyan")
 
-        self._text_area = self.query_one("#chat-input", ChatTextArea)
-        self._popup = self.query_one("#completion-popup", CompletionPopup)
+        from textual.css.query import NoMatches
+
+        try:
+            self._text_area = self.query_one("#chat-input", ChatTextArea)
+            self._popup = self.query_one("#completion-popup", CompletionPopup)
+        except NoMatches:
+            # Some Textual versions may not yet have mounted children when
+            # on_mount runs. Fallback to query by type to avoid crashing.
+            self._text_area = self.query_one(ChatTextArea)
+            self._popup = self.query_one(CompletionPopup)
 
         # Both controllers implement the CompletionController protocol but have
         # different concrete types; the list-item warning is a false positive.

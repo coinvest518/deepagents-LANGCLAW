@@ -15,10 +15,10 @@ duplicate try/finally teardown.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
-import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -104,9 +104,13 @@ def _scaffold_workspace(work_dir: Path) -> None:
     _write_pyproject(work_dir)
 
     checkpointer_path = work_dir / "checkpointer.py"
+    # Use a module-style reference for the graph. The server subprocess's
+    # cwd will be `work_dir` so `server_graph` can be imported directly. Avoid
+    # passing an absolute path which can produce invalid module names on
+    # Windows (paths with spaces) and cause ModuleNotFoundError at import time.
     generate_langgraph_json(
         work_dir,
-        graph_ref=f"{server_graph_dst.resolve()}:graph",
+        graph_ref="server_graph:graph",
         checkpointer_path=f"{checkpointer_path.resolve()}:create_checkpointer",
     )
 
@@ -182,6 +186,91 @@ build-backend = "hatchling.build"
 
 
 # ------------------------------------------------------------------
+# Workspace caching
+# ------------------------------------------------------------------
+
+_WORKSPACE_HASH_FILE = ".scaffold_hash"
+
+
+def _workspace_cache_dir() -> Path:
+    """Return the persistent server workspace directory under ``~/.deepagents``.
+
+    Using a fixed path means ``langgraph dev`` can reuse the ``.venv`` it
+    created on the first run, skipping the 30-60 second dependency-install
+    step on every subsequent startup.
+
+    Returns:
+        Path to the cache directory (created if absent).
+    """
+    cache_dir = Path.home() / ".deepagents" / "server_workspace"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _scaffold_hash() -> str:
+    """Compute a short hash over the source files that make up the workspace.
+
+    When ``server_graph.py`` or the CLI's ``pyproject.toml`` changes (e.g.
+    after a CLI upgrade), the hash changes and the workspace is re-scaffolded
+    so ``langgraph dev`` reinstalls the correct dependencies.
+
+    Returns:
+        First 16 hex digits of the SHA-256 hash.
+    """
+    h = hashlib.sha256()
+    src = Path(__file__).parent / "server_graph.py"
+    if src.exists():
+        h.update(src.read_bytes())
+    cli_pyproject = Path(__file__).parent.parent / "pyproject.toml"
+    if cli_pyproject.exists():
+        h.update(cli_pyproject.read_bytes())
+    return h.hexdigest()[:16]
+
+
+def _scaffold_workspace_cached(work_dir: Path) -> None:
+    """Scaffold *work_dir*, skipping the full scaffold when files are unchanged.
+
+    On a cache hit the only action is updating ``DA_SERVER_DB_PATH`` in the
+    current environment so the existing ``checkpointer.py`` picks up the right
+    database path at server startup.
+
+    On a cache miss the full :func:`_scaffold_workspace` runs and the new hash
+    is written, so ``langgraph dev`` will reinstall dependencies.
+
+    Args:
+        work_dir: Persistent workspace directory.
+    """
+    hash_file = work_dir / _WORKSPACE_HASH_FILE
+    current_hash = _scaffold_hash()
+
+    required_files = (
+        "langgraph.json",
+        "server_graph.py",
+        "checkpointer.py",
+        "pyproject.toml",
+    )
+    cache_valid = (
+        hash_file.exists()
+        and hash_file.read_text(encoding="utf-8").strip() == current_hash
+        and all((work_dir / f).exists() for f in required_files)
+    )
+
+    if cache_valid:
+        logger.info("Server workspace cache hit -- skipping scaffold (hash=%s)", current_hash)  # noqa: E501
+        # Still need to refresh DA_SERVER_DB_PATH; the path can change between
+        # runs (e.g. different user or relocated home directory).
+        from deepagents_cli._server_constants import ENV_PREFIX as _ENV_PREFIX_LOCAL
+        from deepagents_cli.sessions import get_db_path
+
+        os.environ[f"{_ENV_PREFIX_LOCAL}DB_PATH"] = str(get_db_path())
+        return
+
+    logger.info("Server workspace cache miss -- scaffolding (hash=%s)", current_hash)
+    _scaffold_workspace(work_dir)
+    hash_file.write_text(current_hash, encoding="utf-8")
+
+
+# ------------------------------------------------------------------
 # Server startup
 # ------------------------------------------------------------------
 
@@ -251,11 +340,12 @@ async def start_server_and_get_agent(
     )
     _apply_server_config(config)
 
-    work_dir = Path(tempfile.mkdtemp(prefix="deepagents_server_"))
-    _scaffold_workspace(work_dir)
+    work_dir = _workspace_cache_dir()
+    _scaffold_workspace_cached(work_dir)
 
+    # owns_config_dir=False — the cache dir is persistent; we never delete it.
     server = ServerProcess(
-        host=host, port=port, config_dir=work_dir, owns_config_dir=True
+        host=host, port=port, config_dir=work_dir, owns_config_dir=False
     )
     try:
         await server.start()
