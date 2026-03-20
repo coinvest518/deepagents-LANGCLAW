@@ -102,8 +102,8 @@ hyperbrowser = ["langchain-hyperbrowser>=0.1.0,<2.0.0"]
 firecrawl = ["langchain-firecrawl>=0.1.0,<2.0.0"]
 
 # Optional adapters for cloud-backed persistent stores
-astrapy = ["astrapy>=1.0.0,<2.0.0"]
-mem0 = ["mem0-client>=0.1.0,<2.0.0"]
+astrapy = ["astrapy>=1.0.0"]
+mem0 = ["mem0ai>=0.1.0"]
 
 # Sandbox providers
 daytona = ["langchain-daytona>=0.0.4"]

@@ -16,10 +16,18 @@ WORKDIR /app
 # Copy repository
 COPY . /app
 
-# Install packages (editable) with cloud-store + all provider extras
-RUN python -m pip install --upgrade pip setuptools wheel \
-    && pip install -e "libs/deepagents[astrapy,mem0]" \
-    && pip install -e "libs/cli[astrapy,mem0]"
+# Install base packages first (no optional extras that may not be on PyPI).
+# Cloud stores (mem0ai, astrapy) are runtime-optional: the agent auto-detects
+# them from env vars and skips gracefully if packages are absent.
+# Upgrade pip first to avoid legacy resolver warnings.
+RUN pip install --upgrade pip setuptools wheel --root-user-action=ignore \
+    && pip install -e "libs/deepagents" --root-user-action=ignore \
+    && pip install -e "libs/cli" --root-user-action=ignore
+
+# Install optional cloud-store packages separately so a single failure
+# does not break the whole build.  These are non-fatal if unavailable.
+RUN pip install "mem0ai>=0.1.0" "astrapy>=1.0.0" --root-user-action=ignore || \
+    echo "Optional cloud-store packages not available — stores disabled at runtime"
 
 # Persistent storage lives under ~/.deepagents (sessions, cron logs, workspace cache)
 # Render mounts a disk here when you add a persistent disk to the service.

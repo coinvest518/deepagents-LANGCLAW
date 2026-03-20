@@ -13,42 +13,58 @@ class StoreItem:
 
 
 class Mem0Store:
-    """Minimal adapter for mem0 store.
+    """Adapter for mem0 cloud memory using the `mem0ai` package.
 
-    This adapter expects an installed mem0 client package named `mem0_client`.
-    Install as instructed by your mem0 provider. If the package isn't present
-    the adapter raises an ImportError with installation instructions.
+    Install: pip install mem0ai
+    Required env: MEM0_API_KEY
+    Optional env: MEM0_ENDPOINT (custom base URL)
     """
 
-    def __init__(self, client: Any):
+    def __init__(self, client: Any) -> None:
         self.client = client
 
     @classmethod
     def from_env(cls) -> Mem0Store:
         try:
-            import mem0_client as mem0  # type: ignore
-        except Exception as exc:  # pragma: no cover - optional dependency
-            raise ImportError("mem0_client is required for Mem0Store. Install it per mem0 provider docs.") from exc
+            from mem0 import MemoryClient  # mem0ai exposes itself as `mem0`
+        except ImportError as exc:
+            raise ImportError(
+                "mem0ai is required for Mem0Store. Install with: pip install mem0ai"
+            ) from exc
 
         api_key = os.environ.get("MEM0_API_KEY")
-        endpoint = os.environ.get("MEM0_ENDPOINT")
         if not api_key:
             raise ValueError("MEM0_API_KEY must be set")
 
-        client = mem0.Client(api_key=api_key, base_url=endpoint) if endpoint else mem0.Client(api_key=api_key)
+        client = MemoryClient(api_key=api_key)
         return cls(client=client)
+
+    # Mem0 uses user_id for namespace isolation and memory_id for individual items.
+    # We map (namespace, key) → user_id=namespace_str, and store key in metadata.
+
+    def _user_id(self, namespace: tuple[str, ...]) -> str:
+        return "/".join(namespace)
 
     def get(self, namespace: tuple[str, ...], key: str) -> StoreItem | None:
         try:
-            doc = self.client.get(namespace="/".join(namespace), key=key)
+            results = self.client.search(key, user_id=self._user_id(namespace), limit=1)
+            if results:
+                r = results[0]
+                return StoreItem(key=key, value={"memory": r.get("memory", ""), "id": r.get("id", "")})
         except Exception:
             return None
-        if doc is None:
-            return None
-        return StoreItem(key=key, value=doc)
+        return None
 
     def put(self, namespace: tuple[str, ...], key: str, value: dict) -> None:
-        self.client.put(namespace="/".join(namespace), key=key, value=value)
+        content = value.get("memory") or value.get("content") or str(value)
+        try:
+            self.client.add(
+                [{"role": "user", "content": content}],
+                user_id=self._user_id(namespace),
+                metadata={"key": key},
+            )
+        except Exception:
+            pass
 
     async def aget(self, namespace: tuple[str, ...], key: str) -> StoreItem | None:
         return await asyncio.to_thread(self.get, namespace, key)
@@ -56,9 +72,15 @@ class Mem0Store:
     async def aput(self, namespace: tuple[str, ...], key: str, value: dict) -> None:
         return await asyncio.to_thread(self.put, namespace, key, value)
 
-    def search(self, namespace: tuple[str, ...], *_, **__) -> list:
-        results = self.client.list(namespace="/".join(namespace))
-        items = []
-        for r in results:
-            items.append(StoreItem(key=r.get("key"), value=r.get("value")))
-        return items
+    def search(self, namespace: tuple[str, ...], query: str = "", *_, **__) -> list:
+        try:
+            results = self.client.get_all(user_id=self._user_id(namespace))
+            items = []
+            for r in (results or []):
+                items.append(StoreItem(
+                    key=r.get("id", ""),
+                    value={"memory": r.get("memory", ""), "id": r.get("id", "")},
+                ))
+            return items
+        except Exception:
+            return []

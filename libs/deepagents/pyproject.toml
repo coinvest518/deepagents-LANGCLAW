@@ -150,8 +150,8 @@ markers = [
 
 [project.optional-dependencies]
 # Optional runtime dependencies for cloud-backed stores
-astrapy = ["astrapy>=1.0.0,<2.0.0"]
-mem0 = ["mem0-client>=0.1.0,<2.0.0"]
+astrapy = ["astrapy>=1.0.0"]
+mem0 = ["mem0ai>=0.1.0"]
 
 [tool.ty.environment]
 python-version = "3.11"
