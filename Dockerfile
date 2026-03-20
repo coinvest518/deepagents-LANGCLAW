@@ -32,6 +32,10 @@ RUN pip install "mem0ai>=0.1.0" "astrapy>=1.0.0" --root-user-action=ignore || \
 # Persistent storage lives under ~/.deepagents (sessions, cron logs, workspace cache)
 # Render mounts a disk here when you add a persistent disk to the service.
 ENV DEEPAGENTS_HOME=/root/.deepagents
+# LangGraph SDK requires LANGSMITH_API_KEY even for local dev servers —
+# it's a client-side check. "local" satisfies it; override in Render env
+# vars with your real LangSmith key if you have one.
+ENV LANGSMITH_API_KEY=local
 
 # ── Default start: headless Telegram bot ──────────────────────────────────────
 # Override with Render startCommand or START_CMD env var for other modes:
