@@ -81,12 +81,29 @@ ENABLE_SHELL: bool = os.environ.get("DA_ENABLE_SHELL", "0").lower() in {"1", "tr
 # ---------------------------------------------------------------------------
 from deepagents_cli.server_manager import server_session  # noqa: E402
 from deepagents_cli.sessions import generate_thread_id  # noqa: E402
+import requests  # noqa: E402
+
 from deepagents_cli.telegram_integration import (  # noqa: E402
     BOT_TOKEN,
+    BASE_URL,
     COMMAND_SUBAGENT_MAP,
     TelegramIntegration,
     is_telegram_enabled,
 )
+
+
+def _clear_webhook() -> None:
+    """Call deleteWebhook at startup to release any stuck long-poll connection.
+
+    During Render redeploys the old container may still hold an open
+    getUpdates request.  deleteWebhook forces Telegram to drop it so the
+    new instance can start polling immediately without a 409 Conflict.
+    """
+    try:
+        resp = requests.post(f"{BASE_URL}/deleteWebhook", timeout=10)
+        logger.info("deleteWebhook → %s", resp.json().get("description", "ok"))
+    except Exception:
+        logger.warning("deleteWebhook failed (non-fatal)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +241,10 @@ class HeadlessBot:
             logger.error("BOT_TOKEN not set — bot cannot start.")
             return
 
+        # Clear any stuck webhook / lingering getUpdates from a previous
+        # instance (common during Render redeploys → 409 Conflict).
+        _clear_webhook()
+
         logger.info(
             "Headless bot ready (model=%s, agent=%s, auto_approve=%s)",
             MODEL, AGENT_ID, AUTO_APPROVE,
@@ -259,6 +280,15 @@ class HeadlessBot:
                     except Exception:
                         logger.exception("Error handling Telegram update")
 
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 409:
+                    # Another instance is still polling — wait for it to shut
+                    # down (Render grace period is ~30 s) then retry.
+                    logger.warning("409 Conflict: another bot instance is polling. Waiting 35 s...")
+                    await asyncio.sleep(35)
+                else:
+                    logger.exception("Telegram HTTP error — retrying in 5 s")
+                    await asyncio.sleep(5)
             except Exception:
                 logger.exception("Telegram polling error — retrying in 5 s")
                 await asyncio.sleep(5)
