@@ -12,7 +12,7 @@ services:
   - type: worker
     name: deepagents-telegram-bot
     runtime: docker
-    dockerfilePath: Dockerfile.render
+    # dockerfilePath defaults to ./Dockerfile at repo root — no override needed.
     # startCommand overrides the Dockerfile CMD — leave commented to use the default.
     # startCommand: python deploy/telegram_bot.py
 
