@@ -7,8 +7,12 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware, InterruptOnConfig, TodoListMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain.agents.structured_output import ResponseFormat
-from langchain_anthropic import ChatAnthropic
-from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
+try:
+    from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware as _AnthropicCachingMiddleware
+    _HAS_ANTHROPIC = True
+except ImportError:
+    _AnthropicCachingMiddleware = None  # type: ignore[assignment, misc]
+    _HAS_ANTHROPIC = False
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool
@@ -68,15 +72,33 @@ Keep working until the task is fully complete. Don't stop partway and explain wh
 For longer tasks, provide brief progress updates at reasonable intervals — a concise sentence recapping what you've done and what's next."""  # noqa: E501
 
 
-def get_default_model() -> ChatAnthropic:
+def get_default_model() -> BaseChatModel:
     """Get the default model for deep agents.
 
+    Auto-detects the best available model from environment credentials.
+    Falls back to claude-sonnet-4-6 only when ANTHROPIC_API_KEY is set.
+
     Returns:
-        `ChatAnthropic` instance configured with Claude Sonnet 4.6.
+        A `BaseChatModel` instance.
     """
-    return ChatAnthropic(
-        model_name="claude-sonnet-4-6",
+    import os
+    from langchain.chat_models import init_chat_model
+
+    if os.environ.get("NVIDIA_API_KEY"):
+        return init_chat_model("nvidia:meta/llama-3.3-70b-instruct")
+    if os.environ.get("MISTRAL_API_KEY"):
+        return init_chat_model("mistralai:mistral-large-latest")
+    if os.environ.get("OPENAI_API_KEY"):
+        return init_chat_model("openai:gpt-4o")
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return init_chat_model("anthropic:claude-sonnet-4-6")
+    if os.environ.get("GOOGLE_API_KEY"):
+        return init_chat_model("google_genai:gemini-2.0-flash")
+    msg = (
+        "No LLM API key found. Set one of: NVIDIA_API_KEY, MISTRAL_API_KEY, "
+        "OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY."
     )
+    raise RuntimeError(msg)
 
 
 def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic with many conditional branches
@@ -198,7 +220,7 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
         TodoListMiddleware(),
         FilesystemMiddleware(backend=backend),
         create_summarization_middleware(model, backend),
-        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+        *([_AnthropicCachingMiddleware(unsupported_model_behavior="ignore")] if _HAS_ANTHROPIC else []),
         PatchToolCallsMiddleware(),
     ]
     if skills is not None:
@@ -229,7 +251,7 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
                 TodoListMiddleware(),
                 FilesystemMiddleware(backend=backend),
                 create_summarization_middleware(subagent_model, backend),
-                AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+                *([_AnthropicCachingMiddleware(unsupported_model_behavior="ignore")] if _HAS_ANTHROPIC else []),
                 PatchToolCallsMiddleware(),
             ]
             subagent_skills = spec.get("skills")
@@ -269,7 +291,7 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
                 subagents=all_subagents,
             ),
             create_summarization_middleware(model, backend),
-            AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+            *([_AnthropicCachingMiddleware(unsupported_model_behavior="ignore")] if _HAS_ANTHROPIC else []),
             PatchToolCallsMiddleware(),
         ]
     )

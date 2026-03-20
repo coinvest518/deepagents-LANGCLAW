@@ -71,7 +71,42 @@ logger = logging.getLogger("deepagents.telegram_bot")
 # ---------------------------------------------------------------------------
 # Configuration (from env)
 # ---------------------------------------------------------------------------
-MODEL: str = os.environ.get("DA_MODEL", "anthropic:claude-sonnet-4-6")
+
+def _pick_model() -> str:
+    """Return DA_MODEL if set, otherwise pick the best available model
+    based on which API keys are present in the environment.
+
+    Priority order is tuned for tool-calling ability:
+      1. NVIDIA  — llama-3.3-70b has excellent tool calling (free with nvapi key)
+      2. Mistral — mistral-large has strong tool calling
+      3. OpenRouter — free DeepSeek models, good tool calling
+      4. HuggingFace — Qwen2.5-72B, reliable tool calling
+      5. OpenAI   — gpt-4o (if key present)
+      6. Anthropic — claude-sonnet (if key present)
+      7. Google   — gemini-2.0-flash (if key present)
+    """
+    explicit = os.environ.get("DA_MODEL", "").strip()
+    if explicit:
+        return explicit
+    if os.environ.get("NVIDIA_API_KEY"):
+        return "nvidia:meta/llama-3.3-70b-instruct"
+    if os.environ.get("MISTRAL_API_KEY"):
+        return "mistralai:mistral-large-latest"
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter:deepseek/deepseek-chat-v3-0324:free"
+    if os.environ.get("HUGGINGFACEHUB_API_TOKEN"):
+        return "huggingface:Qwen/Qwen2.5-72B-Instruct"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai:gpt-4o"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic:claude-sonnet-4-6"
+    if os.environ.get("GOOGLE_API_KEY"):
+        return "google_genai:gemini-2.0-flash"
+    # Pass empty string — let the server-side auto-detection handle it
+    return ""
+
+
+MODEL: str = _pick_model()
 AGENT_ID: str = os.environ.get("DA_AGENT_ID", "default")
 AUTO_APPROVE: bool = os.environ.get("DA_AUTO_APPROVE", "1").lower() in {"1", "true", "yes"}
 ENABLE_SHELL: bool = os.environ.get("DA_ENABLE_SHELL", "0").lower() in {"1", "true", "yes"}
