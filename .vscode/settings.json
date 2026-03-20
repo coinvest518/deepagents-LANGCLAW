@@ -3,6 +3,13 @@
   "python.analysis.include": [
     "libs/**"
   ],
+  "python.analysis.extraPaths": [
+    "libs/deepagents",
+    "libs/cli",
+    "libs/partners/daytona",
+    "libs/partners/modal",
+    "libs/partners/runloop"
+  ],
   "python.analysis.exclude": [
     "**/node_modules",
     "**/__pycache__",

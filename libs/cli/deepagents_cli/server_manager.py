@@ -356,6 +356,9 @@ async def start_server_and_get_agent(
     agent = RemoteAgent(
         url=server.url,
         graph_name="agent",
+        # Local langgraph dev server doesn't validate the key, but the SDK
+        # requires *something* to be set or it raises an auth error.
+        api_key=os.environ.get("LANGSMITH_API_KEY") or "local",
     )
 
     return agent, server, None
