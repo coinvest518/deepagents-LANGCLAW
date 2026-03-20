@@ -262,6 +262,14 @@ def _build_server_env() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["LANGGRAPH_AUTH_TYPE"] = "noop"
+    # LangGraph SDK requires one of these keys to be set — even for a local
+    # dev server — or it throws a TypeError before making any network request.
+    # Use whatever the caller has; fall back to "local" so the SDK is satisfied.
+    for key in ("LANGSMITH_API_KEY", "LANGGRAPH_API_KEY", "LANGCHAIN_API_KEY"):
+        if env.get(key):
+            break
+    else:
+        env["LANGSMITH_API_KEY"] = "local"
     for key in (
         "LANGGRAPH_AUTH",
         "LANGGRAPH_CLOUD_LICENSE_KEY",
