@@ -29,7 +29,7 @@ services:
     # Non-secret defaults can be listed here with envVarGroups or inline.
     envVars:
       - key: DA_MODEL
-        value: anthropic:claude-sonnet-4-6
+        value: nvidia:meta/llama-3.3-70b-instruct
       - key: DA_AUTO_APPROVE
         value: "1"
       - key: DA_ENABLE_SHELL
