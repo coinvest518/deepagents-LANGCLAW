@@ -145,26 +145,17 @@ def _clear_webhook() -> None:
 # Streaming helper
 # ---------------------------------------------------------------------------
 
-def _extract_text_from_chunk(chunk: object) -> str:
-    """Extract plain AI-message text from a LangGraph stream chunk.
 
-    Stream chunks are 3-tuples: ``(namespace, mode, data)``.
-    When ``mode == "messages"`` data is ``(message_obj, metadata)``.
-    """
-    if not isinstance(chunk, tuple) or len(chunk) != 3:  # type: ignore[arg-type]
-        return ""
-    _, mode, data = chunk  # type: ignore[misc]
-    if mode != "messages":
-        return ""
-    if not isinstance(data, tuple) or len(data) < 2:
-        return ""
-    msg = data[0]
+def _text_from_message(msg: object) -> str:
+    """Extract plain text from a LangChain message object."""
+    # Skip tool calls — not displayable text
     if getattr(msg, "tool_calls", None):
-        return ""  # tool call — not final text
+        return ""
     content = getattr(msg, "content", "")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
+        # content blocks: [{"type": "text", "text": "..."}, ...]
         return "".join(
             block.get("text", "") if isinstance(block, dict) else str(block)
             for block in content
@@ -173,23 +164,57 @@ def _extract_text_from_chunk(chunk: object) -> str:
 
 
 async def _run_agent(agent: object, message: str, thread_id: str) -> str:
-    """Stream the agent for *message* and return the complete text response."""
-    parts: list[str] = []
+    """Run the agent for *message* and return the complete text response.
+
+    Drains the stream (so the agent runs to completion), then reads the
+    final thread state to extract the last AI message.  This avoids
+    brittle per-chunk format parsing and works across all model providers.
+    """
+    config: dict = {"configurable": {"thread_id": thread_id}}
     try:
+        # Drain the stream so the agent runs to completion.
+        # Collect any text we can along the way as a fast path.
+        parts: list[str] = []
         async for chunk in agent.astream(  # type: ignore[union-attr]
             {"messages": [{"role": "user", "content": message}]},
             stream_mode=["messages", "updates"],
             subgraphs=True,
-            config={"configurable": {"thread_id": thread_id}},
+            config=config,
             durability="exit",
         ):
-            text = _extract_text_from_chunk(chunk)
-            if text:
+            if not isinstance(chunk, tuple) or len(chunk) != 3:
+                continue
+            ns, mode, data = chunk
+            # Only look at main-agent (empty namespace) messages
+            if ns or mode != "messages":
+                continue
+            if not isinstance(data, tuple) or len(data) < 2:
+                continue
+            msg, meta = data
+            if meta and meta.get("lc_source") == "summarization":
+                continue
+            text = _text_from_message(msg)
+            if text.strip():
                 parts.append(text)
+
+        if parts:
+            return "".join(parts).strip()
+
+        # Fast path found nothing — read the final thread state instead.
+        state = await agent.aget_state(config)  # type: ignore[union-attr]
+        if state is None:
+            return "No response received."
+        messages = getattr(state, "values", {}).get("messages", [])
+        for msg in reversed(messages):
+            text = _text_from_message(msg)
+            if text.strip():
+                return text.strip()
+
+        return "No response received."
+
     except Exception:
-        logger.exception("Agent stream error (thread=%s)", thread_id)
+        logger.exception("Agent error (thread=%s)", thread_id)
         return "Sorry, I encountered an error — please try again."
-    return "".join(parts).strip() or "Done."
 
 
 # ---------------------------------------------------------------------------
