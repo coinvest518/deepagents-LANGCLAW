@@ -24,8 +24,20 @@ RUN pip install --upgrade pip setuptools wheel --root-user-action=ignore \
     && pip install -e "libs/deepagents" --root-user-action=ignore \
     && pip install -e "libs/cli" --root-user-action=ignore
 
-# Install optional cloud-store packages separately so a single failure
-# does not break the whole build.  These are non-fatal if unavailable.
+# Install LLM provider packages for the models we actually use.
+# Each is in a separate || echo so one failure never blocks the others.
+RUN pip install "langchain-nvidia-ai-endpoints>=1.0.0" --root-user-action=ignore || \
+    echo "NVIDIA provider not available"
+RUN pip install "langchain-mistralai>=0.2.0" --root-user-action=ignore || \
+    echo "Mistral provider not available"
+RUN pip install "langchain-openai>=0.3.0" --root-user-action=ignore || \
+    echo "OpenAI/OpenRouter provider not available"
+RUN pip install "langchain-anthropic>=0.3.0" --root-user-action=ignore || \
+    echo "Anthropic provider not available"
+RUN pip install "langchain-huggingface>=0.1.0" --root-user-action=ignore || \
+    echo "HuggingFace provider not available"
+
+# Optional cloud-store packages — non-fatal if unavailable.
 RUN pip install "mem0ai>=0.1.0" "astrapy>=1.0.0" --root-user-action=ignore || \
     echo "Optional cloud-store packages not available — stores disabled at runtime"
 
