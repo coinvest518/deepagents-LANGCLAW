@@ -147,15 +147,23 @@ def _clear_webhook() -> None:
 
 
 def _text_from_message(msg: object) -> str:
-    """Extract plain text from a LangChain message object."""
-    # Skip tool calls — not displayable text
-    if getattr(msg, "tool_calls", None):
-        return ""
-    content = getattr(msg, "content", "")
+    """Extract plain text from a message — handles LangChain objects AND plain
+    dicts (aget_state returns raw dicts from the JSON state, not LC objects)."""
+    if isinstance(msg, dict):
+        # Only AI messages contain the response text
+        if msg.get("type") not in ("ai", "AIMessage", "AIMessageChunk"):
+            return ""
+        if msg.get("tool_calls"):  # intermediate step, not the answer
+            return ""
+        content = msg.get("content", "")
+    else:
+        if getattr(msg, "tool_calls", None):
+            return ""
+        content = getattr(msg, "content", "")
+
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        # content blocks: [{"type": "text", "text": "..."}, ...]
         return "".join(
             block.get("text", "") if isinstance(block, dict) else str(block)
             for block in content
@@ -184,9 +192,8 @@ async def _run_agent(agent: object, message: str, thread_id: str) -> str:
         ):
             if not isinstance(chunk, tuple) or len(chunk) != 3:
                 continue
-            ns, mode, data = chunk
-            # Only look at main-agent (empty namespace) messages
-            if ns or mode != "messages":
+            ns, mode, data = chunk  # noqa: F841
+            if mode != "messages":
                 continue
             if not isinstance(data, tuple) or len(data) < 2:
                 continue
