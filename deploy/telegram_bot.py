@@ -76,9 +76,12 @@ def _pick_model() -> str:
     """Return DA_MODEL if set, otherwise pick the best available model
     based on which API keys are present in the environment.
 
-    Priority order is tuned for tool-calling ability:
-      1. NVIDIA  — llama-3.3-70b has excellent tool calling (free with nvapi key)
-      2. Mistral — mistral-large has strong tool calling
+    Priority order is tuned for tool-calling ability and instruction-following
+    with large system prompts (15k+ tokens of tools + prompt):
+      1. Mistral — mistral-large is purpose-built for function calling and
+                   follows complex tool instructions reliably even in large contexts
+      2. NVIDIA  — llama-3.3-70b is capable but can misfire compact_conversation
+                   preemptively when the system prompt is large
       3. OpenRouter — free DeepSeek models, good tool calling
       4. HuggingFace — Qwen2.5-72B, reliable tool calling
       5. OpenAI   — gpt-4o (if key present)
@@ -88,10 +91,10 @@ def _pick_model() -> str:
     explicit = os.environ.get("DA_MODEL", "").strip()
     if explicit:
         return explicit
-    if os.environ.get("NVIDIA_API_KEY"):
-        return "nvidia:meta/llama-3.3-70b-instruct"
     if os.environ.get("MISTRAL_API_KEY"):
         return "mistralai:mistral-large-latest"
+    if os.environ.get("NVIDIA_API_KEY"):
+        return "nvidia:meta/llama-3.3-70b-instruct"
     if os.environ.get("OPENROUTER_API_KEY"):
         return "openrouter:deepseek/deepseek-chat-v3-0324:free"
     if os.environ.get("HUGGINGFACEHUB_API_TOKEN"):

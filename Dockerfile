@@ -58,7 +58,7 @@ ENV LANGSMITH_API_KEY=local
 #   Cron daemon (run scheduled jobs):
 #     python -m deepagents_cli cron daemon
 #
-ENV DA_MODEL="nvidia:meta/llama-3.3-70b-instruct"
+ENV DA_MODEL="mistralai:mistral-large-latest"
 ENV START_CMD="python deploy/telegram_bot.py"
 
 CMD ["/bin/sh", "-c", "${START_CMD}"]
