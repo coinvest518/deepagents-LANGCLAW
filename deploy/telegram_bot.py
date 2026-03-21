@@ -378,7 +378,7 @@ async def main() -> None:
         model_name=MODEL,
         auto_approve=AUTO_APPROVE,
         enable_shell=ENABLE_SHELL,
-        interactive=False,
+        interactive=True,
     ) as (agent, _server):
         bot = HeadlessBot(agent=agent)
         await bot.run()
