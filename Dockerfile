@@ -51,9 +51,19 @@ RUN pip install "langchain-hyperbrowser>=0.4.0" "hyperbrowser>=0.39.0" \
 RUN pip install "firecrawl-py>=4.0.0" --root-user-action=ignore || \
     echo "Firecrawl not available"
 
-# browser-use — open-source AI browser agent (uses cloud browser, no local Chromium needed)
+# browser-use — open-source AI browser agent
+# Install Playwright system dependencies first, then the Python package,
+# then download the Chromium browser binary (non-fatal if either step fails).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+       libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+       libgbm1 libasound2 libpango-1.0-0 libcairo2 libx11-xcb1 \
+    && rm -rf /var/lib/apt/lists/* || true
 RUN pip install "browser-use>=0.12.0" --root-user-action=ignore || \
     echo "browser-use not available"
+RUN python -m playwright install chromium --with-deps 2>/dev/null || \
+    echo "Playwright Chromium install skipped (non-fatal)"
 
 # Daytona sandbox — agent-native cloud execution environment
 RUN pip install "langchain-daytona>=0.0.4" "daytona>=0.1.0" \
