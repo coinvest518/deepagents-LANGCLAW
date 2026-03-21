@@ -382,7 +382,7 @@ async def main() -> None:
         auto_approve=AUTO_APPROVE,
         enable_shell=ENABLE_SHELL,
         interactive=True,
-        enable_memory=False,
+        enable_memory=True,
         enable_skills=False,
         no_mcp=True,
     ) as (agent, _server):
