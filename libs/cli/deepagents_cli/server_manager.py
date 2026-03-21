@@ -286,6 +286,8 @@ async def start_server_and_get_agent(
     sandbox_setup: str | None = None,
     enable_shell: bool = True,
     enable_ask_user: bool = False,
+    enable_memory: bool = True,
+    enable_skills: bool = True,
     mcp_config_path: str | None = None,
     no_mcp: bool = False,
     trust_project_mcp: bool | None = None,
@@ -305,6 +307,8 @@ async def start_server_and_get_agent(
         sandbox_setup: Path to setup script for the sandbox.
         enable_shell: Enable shell execution tools.
         enable_ask_user: Enable ask_user tool.
+        enable_memory: Enable memory tools.
+        enable_skills: Enable skills tools.
         mcp_config_path: Path to MCP config.
         no_mcp: Disable MCP.
         trust_project_mcp: Trust project MCP servers.
@@ -333,6 +337,8 @@ async def start_server_and_get_agent(
         sandbox_setup=sandbox_setup,
         enable_shell=enable_shell,
         enable_ask_user=enable_ask_user,
+        enable_memory=enable_memory,
+        enable_skills=enable_skills,
         mcp_config_path=mcp_config_path,
         no_mcp=no_mcp,
         trust_project_mcp=trust_project_mcp,
@@ -381,6 +387,8 @@ async def server_session(
     sandbox_setup: str | None = None,
     enable_shell: bool = True,
     enable_ask_user: bool = False,
+    enable_memory: bool = True,
+    enable_skills: bool = True,
     mcp_config_path: str | None = None,
     no_mcp: bool = False,
     trust_project_mcp: bool | None = None,
@@ -403,6 +411,8 @@ async def server_session(
         sandbox_setup: Path to setup script for the sandbox.
         enable_shell: Enable shell execution tools.
         enable_ask_user: Enable ask_user tool.
+        enable_memory: Enable memory tools.
+        enable_skills: Enable skills tools.
         mcp_config_path: Path to MCP config.
         no_mcp: Disable MCP.
         trust_project_mcp: Trust project MCP servers.
@@ -426,6 +436,8 @@ async def server_session(
             sandbox_setup=sandbox_setup,
             enable_shell=enable_shell,
             enable_ask_user=enable_ask_user,
+            enable_memory=enable_memory,
+            enable_skills=enable_skills,
             mcp_config_path=mcp_config_path,
             no_mcp=no_mcp,
             trust_project_mcp=trust_project_mcp,

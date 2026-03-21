@@ -225,6 +225,8 @@ class ServerConfig:
         sandbox_setup: str | None,
         enable_shell: bool,
         enable_ask_user: bool,
+        enable_memory: bool = True,
+        enable_skills: bool = True,
         mcp_config_path: str | None,
         no_mcp: bool,
         trust_project_mcp: bool | None,
@@ -247,6 +249,8 @@ class ServerConfig:
             sandbox_setup: Path to setup script for the sandbox.
             enable_shell: Enable shell execution tools.
             enable_ask_user: Enable ask_user tool.
+            enable_memory: Enable memory tools.
+            enable_skills: Enable skills tools.
             mcp_config_path: Path to MCP config.
             no_mcp: Disable MCP.
             trust_project_mcp: Trust project MCP servers.
@@ -265,6 +269,8 @@ class ServerConfig:
             interactive=interactive,
             enable_shell=enable_shell,
             enable_ask_user=enable_ask_user,
+            enable_memory=enable_memory,
+            enable_skills=enable_skills,
             sandbox_type=sandbox_type,
             sandbox_id=sandbox_id,
             sandbox_setup=_normalize_path(
