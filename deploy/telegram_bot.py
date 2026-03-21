@@ -174,19 +174,25 @@ def _text_from_message(msg: object) -> str:
 async def _run_agent(agent: object, message: str, thread_id: str) -> str:
     """Run the agent for *message* and return the complete text response.
 
-    Uses ainvoke (stream_mode="values") which waits for the full run to
-    finish and returns the final state.  This avoids ClosedResourceError
-    that occurs with complex stream modes (messages+updates+subgraphs)
-    when the agent calls tools — the server would try to resume streaming
-    after a tool returns but find the connection in an unexpected state.
+    Drains astream with default params (no subgraphs=True) so the agent
+    runs to completion including all tool calls, then reads the final state.
+    Using subgraphs=True caused ClosedResourceError on the server when tools
+    ran inside subgraphs — removed it to fix that.
     """
     config: dict = {"configurable": {"thread_id": thread_id}}
     try:
-        result = await agent.ainvoke(  # type: ignore[union-attr]
+        # Drain the stream — runs agent + tools to completion.
+        async for _ in agent.astream(  # type: ignore[union-attr]
             {"messages": [{"role": "user", "content": message}]},
             config=config,
-        )
-        messages = (result or {}).get("messages", [])
+        ):
+            pass
+
+        # Read the final state for the response text.
+        state = await agent.aget_state(config)  # type: ignore[union-attr]
+        if state is None:
+            return "No response received."
+        messages = getattr(state, "values", {}).get("messages", [])
         for msg in reversed(messages):
             text = _text_from_message(msg)
             if text.strip():
