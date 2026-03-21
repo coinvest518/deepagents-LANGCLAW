@@ -241,6 +241,9 @@ class HeadlessApp:
         self._tg = tg
         # Map Telegram chat_id → LangGraph thread_id for conversation continuity.
         self._threads: dict[int, str] = {}
+        # Per-chat lock — prevents concurrent streams to the same thread which
+        # causes ClosedResourceError on the langgraph server.
+        self._locks: dict[int, asyncio.Lock] = {}
 
     def _get_thread_id(self, chat_id: int) -> str:
         if chat_id not in self._threads:
@@ -262,20 +265,30 @@ class HeadlessApp:
         source: str = "telegram",  # noqa: ARG002
         telegram_chat_id: int | None = None,
     ) -> None:
-        """Process one Telegram message through the agent and reply."""
+        """Process one Telegram message through the agent and reply.
+
+        Uses a per-chat lock so that if two messages arrive quickly, the second
+        waits rather than starting a concurrent stream to the same thread — which
+        causes ClosedResourceError on the langgraph server.
+        """
         if telegram_chat_id is None:
             return
 
-        thread_id = self._get_thread_id(telegram_chat_id)
-        logger.info("chat_id=%d thread=%s: %.80s", telegram_chat_id, thread_id, message)
+        if telegram_chat_id not in self._locks:
+            self._locks[telegram_chat_id] = asyncio.Lock()
 
-        # Show typing + placeholder immediately.
-        await self._tg._start_thinking(telegram_chat_id)
+        async with self._locks[telegram_chat_id]:
+            thread_id = self._get_thread_id(telegram_chat_id)
+            logger.info("chat_id=%d thread=%s: %.80s", telegram_chat_id, thread_id, message)
 
-        # Run the agent.
-        response = await _run_agent(self._agent, message, thread_id)
+            # Show typing + placeholder immediately.
+            await self._tg._start_thinking(telegram_chat_id)
 
-        # Deliver the formatted response (replaces the ⏳ placeholder).
+            # Run the agent.
+            response = await _run_agent(self._agent, message, thread_id)
+
+        # Deliver outside the lock so the next message can start processing
+        # while we're waiting for Telegram's API to accept the reply.
         self._tg.deliver_reply(telegram_chat_id, response)
 
 
