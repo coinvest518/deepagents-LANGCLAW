@@ -41,6 +41,24 @@ RUN pip install "langchain-huggingface>=0.1.0" --root-user-action=ignore || \
 RUN pip install "mem0ai>=0.1.0" "astrapy>=1.0.0" --root-user-action=ignore || \
     echo "Optional cloud-store packages not available — stores disabled at runtime"
 
+# Composio — multi-toolkit connector (GitHub, Gmail, LinkedIn, Sheets, etc.)
+RUN pip install "composio>=1.0.0" "composio-langchain>=0.9.0" "composio-client>=1.0.0" \
+    --root-user-action=ignore || echo "Composio not available"
+
+# Web interaction tools
+RUN pip install "langchain-hyperbrowser>=0.4.0" "hyperbrowser>=0.39.0" \
+    --root-user-action=ignore || echo "Hyperbrowser not available"
+RUN pip install "firecrawl-py>=4.0.0" --root-user-action=ignore || \
+    echo "Firecrawl not available"
+
+# browser-use — open-source AI browser agent (uses cloud browser, no local Chromium needed)
+RUN pip install "browser-use>=0.12.0" --root-user-action=ignore || \
+    echo "browser-use not available"
+
+# Daytona sandbox — agent-native cloud execution environment
+RUN pip install "langchain-daytona>=0.0.4" "daytona>=0.1.0" \
+    --root-user-action=ignore || echo "Daytona not available"
+
 # Persistent storage lives under ~/.deepagents (sessions, cron logs, workspace cache)
 # Render mounts a disk here when you add a persistent disk to the service.
 ENV DEEPAGENTS_HOME=/root/.deepagents

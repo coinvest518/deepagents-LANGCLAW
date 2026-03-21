@@ -1,36 +1,65 @@
 ---
 name: composio
-description: Use Composio as the primary gateway to Tavily and other connected services. Provides guidance and examples for agents to call Composio-backed capabilities.
+description: Use Composio to interact with connected services — GitHub, Gmail, LinkedIn, Google Sheets, Twitter, Telegram, Google Drive, Google Analytics, and 200+ more tools.
 ---
 
 # Composio Skill
 
-Composio is a multi-capability connector (gateway) that can proxy or orchestrate downstream services such as Tavily, site connectors (GitHub, Gmail), and other crawlers. Treat Composio as the preferred path for web-search, crawling, connector access, and other remote capabilities.
+Composio is your primary gateway to external services. Your account has these **active connected toolkits** — all pre-authenticated:
 
-Usage guidance for agents and developers
+| Toolkit | What you can do |
+|---|---|
+| **github** | Create repos, branches, issues, PRs, commits, run actions |
+| **gmail** | Read, send, draft, search, label emails |
+| **linkedin** | Create posts, articles, comments |
+| **googlesheets** | Read, write, update, create spreadsheets |
+| **twitter** | Post tweets, read timeline |
+| **telegram** | Send messages to Telegram chats/channels |
+| **googledrive** | Upload, download, list, share files |
+| **google_analytics** | Query analytics data and reports |
 
-- Environment: ensure `COMPOSIO_API_KEY` and `COMPOSIO_API_URL` are set in the environment (or project `.env`).
-- Import: the runtime may expose a `composio` client from the `composio` or `composio_client` package. The test script in this folder demonstrates safe client initialization.
-- Preferred routing: call Composio first for `search`, `fetch`, or connector operations. If Composio reports the capability is unavailable, call provider-specific adapters (HyperBrowser, Firecrawl).
+## How to execute actions
 
-Agent pattern (recommended)
+```python
+import os
+from composio import Composio
+client = Composio(api_key=os.environ["COMPOSIO_API_KEY"])
 
-1. Decide to search the web. Use `task` to spawn a short subagent with the narrow prompt:
+# Get connected account id
+accounts = client.connected_accounts.list()
+acc = next(a for a in accounts.items
+           if getattr(a.toolkit, "slug", "") == "github"
+           and a.data.get("status") == "ACTIVE")
 
-   ```
-   Research [TOPIC]. Use the `composio.search` or runtime `web_search` tool (which prefers Composio).
-   Save findings to `research_[topic]/findings_[i].md` using `write_file`.
-   Limit to 3-5 searches.
-   ```
+# Execute action
+result = client.tools.execute(
+    "GITHUB_CREATE_AN_ISSUE",
+    arguments={"owner": "myorg", "repo": "myrepo", "title": "Bug", "body": "Details"},
+    connected_account_id=acc.id,
+    dangerously_skip_version_check=True,
+)
+```
 
-2. Synthesis: After subagents finish, read files and synthesize final answer.
+## Action name format: {TOOLKIT_UPPERCASE}_{ACTION}
 
-Developer notes
+Common actions:
+- GITHUB_CREATE_AN_ISSUE, GITHUB_LIST_REPOSITORY_ISSUES, GITHUB_CREATE_A_PULL_REQUEST
+- GMAIL_SEND_EMAIL, GMAIL_FETCH_EMAILS, GMAIL_CREATE_EMAIL_DRAFT
+- GOOGLESHEETS_BATCH_UPDATE, GOOGLESHEETS_BATCH_GET
+- GOOGLEDRIVE_UPLOAD_FILE, GOOGLEDRIVE_LIST_FILES
+- LINKEDIN_CREATE_LINKED_IN_POST
+- TWITTER_CREATION_OF_A_POST
 
-- See `scripts/test_composio.py` for a safe, multi-attempt client initialization and examples of `list tools` and `search` calls.
-- The runtime `web_search` tool should be extended to call Composio first and fall back to other providers; consider adding an adapter in `libs/cli/deepagents_cli/tools.py`.
+## Discover actions for a toolkit
 
-Security & rate limits
+```python
+tools = client.tools.get_raw_composio_tools(toolkits=["github"], limit=50)
+for t in tools: print(t.slug)
+```
 
-- Avoid large-scale crawling without explicit approval. Keep parallel searches small.
-- Sanitize user-provided URLs and queries where applicable.
+## Notes
+
+- COMPOSIO_API_KEY is always in the environment
+- Always use dangerously_skip_version_check=True
+- All 8 toolkits pre-authenticated — no OAuth needed
+- Test: python scripts/test_composio.py
