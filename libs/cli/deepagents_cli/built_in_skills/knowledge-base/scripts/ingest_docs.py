@@ -107,7 +107,35 @@ def get_astra():
         return None, None
 
 
-def store_chunk(mem0, astra_db, chunk_text: str, meta: dict, chunk_id: str):
+def get_vector_store():
+    """Try to get an AstraDB vector store using HuggingFace embeddings (free).
+    Falls back to None if sentence-transformers or langchain-astradb not installed.
+    Install with: pip install sentence-transformers langchain-astradb
+    """
+    api_key = os.environ.get("ASTRA_DB_API_KEY")
+    endpoint = os.environ.get("ASTRA_DB_ENDPOINT")
+    if not api_key or not endpoint:
+        return None
+    try:
+        from langchain_huggingface import HuggingFaceEmbeddings
+        from langchain_astradb import AstraDBVectorStore
+        print("  Using HuggingFace embeddings (sentence-transformers/all-MiniLM-L6-v2)…")
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        vs = AstraDBVectorStore(
+            embedding=embeddings,
+            collection_name="knowledge_base_vectors",
+            api_endpoint=endpoint,
+            token=api_key,
+        )
+        return vs
+    except ImportError:
+        return None  # not installed — silent fallback to Mem0+AstraDB
+    except Exception as e:
+        print(f"WARN: Vector store unavailable — {e}")
+        return None
+
+
+def store_chunk(mem0, astra_db, chunk_text: str, meta: dict, chunk_id: str, vector_store=None):
     """Store a single chunk in Mem0 and/or AstraDB."""
     content = f"[{meta['filename']} | page {meta['page']} | chunk {meta['chunk']}]\n\n{chunk_text}"
 
@@ -121,6 +149,17 @@ def store_chunk(mem0, astra_db, chunk_text: str, meta: dict, chunk_id: str):
             )
         except Exception as e:
             print(f"  WARN Mem0: {e}")
+
+    # HuggingFace vector store (best semantic search, free embeddings)
+    if vector_store:
+        try:
+            from langchain_core.documents import Document
+            vector_store.add_documents(
+                [Document(page_content=chunk_text, metadata={**meta, "chunk_id": chunk_id})],
+                ids=[chunk_id],
+            )
+        except Exception as e:
+            print(f"  WARN VectorStore: {e}")
 
     # AstraDB — structured backup
     if astra_db:
@@ -139,7 +178,7 @@ def store_chunk(mem0, astra_db, chunk_text: str, meta: dict, chunk_id: str):
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
 
-def ingest_file(path: str, mem0, astra_db):
+def ingest_file(path: str, mem0, astra_db, vector_store=None):
     filename = Path(path).name
     print(f"\n📄 Ingesting: {filename}")
 
@@ -159,7 +198,7 @@ def ingest_file(path: str, mem0, astra_db):
                 "total_chunks": len(chunks),
             }
             chunk_id = hashlib.md5(f"{filename}:p{page_data['page']}:c{i}".encode()).hexdigest()
-            store_chunk(mem0, astra_db, chunk, meta, chunk_id)
+            store_chunk(mem0, astra_db, chunk, meta, chunk_id, vector_store)
             total_chunks += 1
             print(f"  ✓ page {page_data['page']}, chunk {i+1}/{len(chunks)}", end="\r")
 
@@ -229,12 +268,17 @@ def main():
 
     mem0 = get_mem0()
     astra_db, _ = get_astra()
+    vector_store = get_vector_store()
 
-    if not mem0 and not astra_db:
+    if not mem0 and not astra_db and not vector_store:
         print("ERROR: No storage backend found. Set MEM0_API_KEY and/or ASTRA_DB_API_KEY + ASTRA_DB_ENDPOINT.")
         sys.exit(1)
 
-    print(f"Storage: {'Mem0 ✓' if mem0 else 'Mem0 ✗'}  |  {'AstraDB ✓' if astra_db else 'AstraDB ✗'}")
+    print(
+        f"Storage: {'Mem0 ✓' if mem0 else 'Mem0 ✗'}  |  "
+        f"{'AstraDB ✓' if astra_db else 'AstraDB ✗'}  |  "
+        f"{'HuggingFace VectorStore ✓' if vector_store else 'HuggingFace VectorStore ✗ (pip install sentence-transformers langchain-astradb to enable)'}"
+    )
 
     if "--clear" in args:
         clear_knowledge_base(astra_db)
@@ -265,7 +309,7 @@ def main():
 
     total = 0
     for f in files:
-        total += ingest_file(str(f), mem0, astra_db)
+        total += ingest_file(str(f), mem0, astra_db, vector_store)
 
     print(f"\n✅ Done — {total} total chunks ingested from {len(files)} file(s)")
 

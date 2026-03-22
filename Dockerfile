@@ -73,6 +73,9 @@ RUN pip install "langchain-daytona>=0.0.4" "daytona>=0.1.0" \
 RUN pip install "eth-account>=0.11.0" \
     --root-user-action=ignore || echo "eth-account not available"
 
+RUN pip install "aiohttp>=3.9.0" \
+    --root-user-action=ignore || echo "aiohttp not available"
+
 # Persistent storage lives under ~/.deepagents (sessions, cron logs, workspace cache)
 # Render mounts a disk here when you add a persistent disk to the service.
 ENV DEEPAGENTS_HOME=/root/.deepagents

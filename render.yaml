@@ -9,12 +9,13 @@ services:
   #   2. Create a new Background Worker in Render, point it at this repo.
   #   3. Set the environment variables listed below in the Render dashboard.
   #
-  - type: worker
+  - type: web
     name: deepagents-telegram-bot
     runtime: docker
     # dockerfilePath defaults to ./Dockerfile at repo root — no override needed.
     # startCommand overrides the Dockerfile CMD — leave commented to use the default.
     # startCommand: python deploy/telegram_bot.py
+    healthCheckPath: /health
 
     # ── Disk (optional but recommended) ───────────────────────────────────────
     # Uncomment to add a 1 GB persistent disk so session history, cron jobs,

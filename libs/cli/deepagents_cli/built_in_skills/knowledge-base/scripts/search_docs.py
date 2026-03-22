@@ -43,6 +43,47 @@ def get_astra():
         return None
 
 
+def get_vector_store():
+    api_key = os.environ.get("ASTRA_DB_API_KEY")
+    endpoint = os.environ.get("ASTRA_DB_ENDPOINT")
+    if not api_key or not endpoint:
+        return None
+    try:
+        from langchain_huggingface import HuggingFaceEmbeddings
+        from langchain_astradb import AstraDBVectorStore
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        return AstraDBVectorStore(
+            embedding=embeddings,
+            collection_name="knowledge_base_vectors",
+            api_endpoint=endpoint,
+            token=api_key,
+        )
+    except Exception:
+        return None
+
+
+def search_vector_store(vs, query: str, limit: int, filename_filter: str | None) -> list[dict]:
+    try:
+        docs = vs.similarity_search_with_score(query, k=limit)
+        results = []
+        for doc, score in docs:
+            meta = doc.metadata
+            if filename_filter and filename_filter.lower() not in meta.get("filename", "").lower():
+                continue
+            results.append({
+                "source": "vector_store",
+                "filename": meta.get("filename", "?"),
+                "page": meta.get("page", "?"),
+                "chunk": meta.get("chunk", "?"),
+                "score": float(score),
+                "text": doc.page_content,
+            })
+        return results
+    except Exception as e:
+        print(f"WARN VectorStore search: {e}")
+        return []
+
+
 def search_mem0(mem0, query: str, limit: int, filename_filter: str | None) -> list[dict]:
     try:
         results = mem0.search(query, user_id="knowledge_base", limit=limit)
@@ -109,18 +150,23 @@ def main():
 
     mem0 = get_mem0()
     astra_db = get_astra()
+    vs = get_vector_store()
 
-    if not mem0 and not astra_db:
+    if not mem0 and not astra_db and not vs:
         print("ERROR: No storage backend. Set MEM0_API_KEY and/or ASTRA_DB_API_KEY.")
         sys.exit(1)
 
     results = []
 
-    # Mem0 is primary — semantic search
-    if mem0:
+    # HuggingFace vector store is best (true semantic similarity)
+    if vs:
+        results = search_vector_store(vs, query, limit, filename_filter)
+
+    # Mem0 fallback — also semantic
+    if not results and mem0:
         results = search_mem0(mem0, query, limit, filename_filter)
 
-    # AstraDB fallback if Mem0 returned nothing
+    # AstraDB keyword fallback
     if not results and astra_db:
         results = search_astra(astra_db, query, limit, filename_filter)
 

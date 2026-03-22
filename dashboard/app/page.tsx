@@ -1,6 +1,9 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts'
+import UploadPanel from '@/components/UploadPanel'
+import PreviewPanel from '@/components/PreviewPanel'
+import ChatPanel from '@/components/ChatPanel'
 
 // ─── types ────────────────────────────────────────────────────────────────────
 interface Run { id: string; name: string; run_type: string; status: string; start_time: string; total_tokens: number; prompt_tokens: number; completion_tokens: number; error?: string; parent_run_id?: string; inputs_preview?: string; outputs_preview?: string }
@@ -60,6 +63,7 @@ export default function CommandCenter() {
   const [tick, setTick] = useState(0)
   const [loading, setLoading] = useState(true)
   const [time, setTime] = useState('')
+  const [previewOpen, setPreviewOpen] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -89,9 +93,12 @@ export default function CommandCenter() {
 
   const activeRuns = runs.filter(r => r.status === 'running')
   const recentRuns = runs.slice(0, 12)
+  const latestOutput = runs.find(r => r.status === 'success' && r.outputs_preview)?.outputs_preview
 
   return (
-    <div className="min-h-screen bg-hud-bg p-4 font-mono">
+    <div className="min-h-screen bg-hud-bg font-mono flex">
+    {/* ── Main content ── */}
+    <div className={`flex-1 min-w-0 p-4 transition-all ${previewOpen ? 'mr-0' : ''}`}>
       {/* ── Header ── */}
       <header className="flex items-center justify-between mb-6 border-b border-hud-border pb-3">
         <div className="flex items-center gap-4">
@@ -105,12 +112,18 @@ export default function CommandCenter() {
             <span className="border border-hud-border px-2 py-0.5 rounded text-hud-green">ONLINE</span>
           </div>
         </div>
-        <div className="flex items-center gap-6 text-[10px] text-hud-text/50">
+        <div className="flex items-center gap-4 text-[10px] text-hud-text/50">
           {activeRuns.length > 0 && (
             <span className="flex items-center text-hud-cyan"><LiveDot />{activeRuns.length} ACTIVE<ThinkingDots /></span>
           )}
-          <span>{time}</span>
+          <span className="hidden sm:block">{time}</span>
           <span className="text-hud-text/30">TICK {tick}</span>
+          <button
+            onClick={() => setPreviewOpen(!previewOpen)}
+            className={`px-3 py-1 rounded border text-[9px] tracking-widest transition-colors ${previewOpen ? 'border-hud-cyan text-hud-cyan bg-hud-cyan/10' : 'border-hud-border text-hud-text/50 hover:border-hud-cyan/50 hover:text-hud-cyan'}`}
+          >
+            ◈ PREVIEW
+          </button>
         </div>
       </header>
 
@@ -218,6 +231,16 @@ export default function CommandCenter() {
         </Panel>
       </div>
 
+      {/* ── Chat + Activity ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+        {/* Agent Chat */}
+        <Panel title="AGENT CHAT" tag="DIRECT CONTROL" className="glow-cyan" >
+          <div className="flex flex-col" style={{ height: '380px' }}>
+            <ChatPanel />
+          </div>
+        </Panel>
+      </div>
+
       {/* ── Agent Activity ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
 
@@ -293,25 +316,9 @@ export default function CommandCenter() {
           </div>
         </Panel>
 
-        {/* Skills loaded */}
-        <Panel title="LOADED SKILLS" tag="SYSTEM">
-          <div className="space-y-2">
-            {[
-              { name: 'alchemy', status: 'ACTIVE', desc: 'Blockchain / wallet data' },
-              { name: 'composio', status: 'ACTIVE', desc: '8 connected toolkits' },
-              { name: 'search-online', status: 'ACTIVE', desc: 'Web search + crawl' },
-              { name: 'browser-use', status: 'ACTIVE', desc: 'Chromium automation' },
-              { name: 'skill-creator', status: 'ACTIVE', desc: 'Self-improvement' },
-            ].map(s => (
-              <div key={s.name} className="flex items-center justify-between text-[10px]">
-                <div className="flex items-center gap-2">
-                  <span className="text-hud-green">▶</span>
-                  <span className="text-hud-text">{s.name}</span>
-                </div>
-                <span className="text-hud-text/40">{s.desc}</span>
-              </div>
-            ))}
-          </div>
+        {/* Knowledge Base Upload */}
+        <Panel title="KNOWLEDGE BASE" tag="UPLOAD + SEARCH">
+          <UploadPanel />
         </Panel>
 
         {/* System info */}
@@ -344,6 +351,16 @@ export default function CommandCenter() {
         <span>DEEPAGENTS COMMAND CENTER — COINVEST518</span>
         <span>POWERED BY LANGSMITH · ALCHEMY · MISTRAL</span>
       </footer>
+    </div>
+
+    {previewOpen && (
+      <div className="w-96 shrink-0 border-l border-hud-border bg-hud-bg/95 p-4 flex flex-col sticky top-0 h-screen overflow-hidden">
+        <PreviewPanel
+          latestOutput={latestOutput}
+          onClose={() => setPreviewOpen(false)}
+        />
+      </div>
+    )}
     </div>
   )
 }

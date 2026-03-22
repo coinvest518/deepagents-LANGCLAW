@@ -165,6 +165,8 @@ def _is_casual(text: str) -> bool:
 AGENT_ID: str = os.environ.get("DA_AGENT_ID", "default")
 AUTO_APPROVE: bool = os.environ.get("DA_AUTO_APPROVE", "1").lower() in {"1", "true", "yes"}
 ENABLE_SHELL: bool = os.environ.get("DA_ENABLE_SHELL", "0").lower() in {"1", "true", "yes"}
+DASHBOARD_SECRET: str = os.environ.get("DASHBOARD_SECRET", "")
+API_PORT: int = int(os.environ.get("PORT", "10000"))
 
 # ---------------------------------------------------------------------------
 # Imports (after path setup)
@@ -366,6 +368,25 @@ class HeadlessApp:
 # Bot runner
 # ---------------------------------------------------------------------------
 
+_INGEST_SCRIPT = _REPO / "libs/cli/deepagents_cli/built_in_skills/knowledge-base/scripts/ingest_docs.py"
+_UPLOAD_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "da_uploads"
+
+
+def _run_ingest_sync(local_path: str) -> str:
+    """Run the ingest script in a subprocess and return a summary."""
+    import subprocess
+    result = subprocess.run(
+        [sys.executable, str(_INGEST_SCRIPT), local_path],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env={**os.environ},
+    )
+    output = (result.stdout + result.stderr).strip()
+    lines = [l for l in output.splitlines() if l.strip()]
+    return "\n".join(lines[-4:]) if lines else "Done"
+
+
 class HeadlessBot:
     """Telegram long-poll loop backed by a HeadlessApp + TelegramIntegration."""
 
@@ -384,6 +405,52 @@ class HeadlessBot:
 
         self._tg = tg
         self._app = app
+
+    async def _handle_document(self, msg: dict, chat_id: int) -> None:
+        """Download a file sent to the bot and ingest it into the knowledge base."""
+        doc = msg.get("document", {})
+        file_id = doc.get("file_id", "")
+        filename = doc.get("file_name", "upload")
+        mime = doc.get("mime_type", "")
+
+        allowed_ext = {".pdf", ".txt", ".md", ".rst", ".csv", ".json"}
+        ext = Path(filename).suffix.lower()
+        if ext not in allowed_ext:
+            self._tg.send_message(
+                chat_id,
+                f"⚠️ Unsupported file: <code>{filename}</code>\n"
+                "Supported: PDF, TXT, MD, RST, CSV, JSON",
+            )
+            return
+
+        self._tg.send_message(chat_id, f"📄 Receiving <code>{filename}</code>…")
+        try:
+            # Resolve download URL
+            resp = requests.get(
+                f"{BASE_URL}/getFile",
+                params={"file_id": file_id},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            tg_path = resp.json()["result"]["file_path"]
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{tg_path}"
+
+            # Download
+            _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            local_path = _UPLOAD_DIR / filename
+            dl = requests.get(file_url, timeout=120)
+            dl.raise_for_status()
+            local_path.write_bytes(dl.content)
+
+            # Ingest in thread so we don't block the event loop
+            summary = await asyncio.to_thread(_run_ingest_sync, str(local_path))
+            self._tg.send_message(
+                chat_id,
+                f"✅ Ingested <code>{filename}</code>\n<pre>{summary}</pre>",
+            )
+        except Exception as exc:
+            logger.exception("Document ingest failed for %s", filename)
+            self._tg.send_message(chat_id, f"❌ Failed to ingest {filename}: {exc}")
 
     async def run(self) -> None:
         """Long-poll Telegram forever, dispatching each message to the agent."""
@@ -423,6 +490,11 @@ class HeadlessBot:
                             self._tg.send_message(chat_id, "Conversation reset.")
                             continue
 
+                        # Handle document uploads → ingest into knowledge base
+                        if chat_id and msg.get("document"):
+                            await self._handle_document(msg, chat_id)
+                            continue
+
                         # Let TelegramIntegration handle all other routing
                         # (commands, media, allowed-list checks, etc.)
                         self._tg.handle_telegram_update(update)
@@ -442,6 +514,78 @@ class HeadlessBot:
             except Exception:
                 logger.exception("Telegram polling error — retrying in 5 s")
                 await asyncio.sleep(5)
+
+
+# ---------------------------------------------------------------------------
+# HTTP API server (dashboard ↔ agent bridge)
+# ---------------------------------------------------------------------------
+
+def _check_secret(request: object) -> bool:
+    """Return True if the request carries the correct DASHBOARD_SECRET header."""
+    if not DASHBOARD_SECRET:
+        return True  # no secret configured → open (trust your network / Vercel IP)
+    try:
+        return request.headers.get("X-Dashboard-Secret", "") == DASHBOARD_SECRET  # type: ignore[attr-defined]
+    except Exception:
+        return False
+
+
+async def start_api_server(agent: object) -> None:
+    """Run a lightweight aiohttp HTTP server exposing /health and /chat."""
+    try:
+        from aiohttp import web
+    except ImportError:
+        logger.warning("aiohttp not installed — HTTP API server disabled. pip install aiohttp to enable.")
+        return
+
+    # Keep a simple per-thread-id lock store to prevent concurrent streams
+    _api_locks: dict[str, asyncio.Lock] = {}
+
+    async def health(request: web.Request) -> web.Response:
+        return web.json_response({"status": "ok", "model": MODEL, "agent": AGENT_ID})
+
+    async def chat(request: web.Request) -> web.Response:
+        if not _check_secret(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        message: str = (data.get("message") or "").strip()
+        thread_id: str = (data.get("thread_id") or "dashboard-default").strip()
+
+        if not message:
+            return web.json_response({"error": "message is required"}, status=400)
+
+        if thread_id not in _api_locks:
+            _api_locks[thread_id] = asyncio.Lock()
+
+        async with _api_locks[thread_id]:
+            try:
+                if _is_casual(message) and CHAT_MODEL != MODEL:
+                    response = await _quick_chat(message)
+                    if response:
+                        return web.json_response({"response": response, "fast_path": True})
+                response = await _run_agent(agent, message, thread_id)
+                return web.json_response({"response": response, "thread_id": thread_id})
+            except Exception as exc:
+                logger.exception("HTTP /chat error")
+                return web.json_response({"error": str(exc)}, status=500)
+
+    app = web.Application()
+    app.router.add_get("/health", health)
+    app.router.add_post("/chat", chat)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", API_PORT)
+    await site.start()
+    logger.info("HTTP API server listening on port %d", API_PORT)
+
+    # Keep alive — this coroutine runs alongside bot.run() via asyncio.gather
+    while True:
+        await asyncio.sleep(3600)
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +618,10 @@ async def main() -> None:
         no_mcp=True,
     ) as (agent, _server):
         bot = HeadlessBot(agent=agent)
-        await bot.run()
+        await asyncio.gather(
+            bot.run(),
+            start_api_server(agent),
+        )
 
 
 if __name__ == "__main__":
