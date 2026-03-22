@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -110,6 +111,57 @@ def _pick_model() -> str:
 
 
 MODEL: str = _pick_model()
+
+
+def _pick_chat_model() -> str:
+    """Return the cheapest available model for casual chat (no tools needed).
+
+    Priority: Ollama (free/self-hosted) → Mistral Small (cheap) → same as MODEL.
+    When the result equals MODEL the fast path is skipped entirely — no point
+    routing to the same model without tools if we already pay per token.
+    """
+    if os.environ.get("OLLAMA_BASE_URL"):
+        return "ollama:llama3.2:1b"
+    if os.environ.get("MISTRAL_API_KEY"):
+        # Small is ~6x cheaper than Large for casual replies
+        return "mistralai:mistral-small-latest"
+    return MODEL  # no cheaper option available → skip fast path
+
+
+CHAT_MODEL: str = _pick_chat_model()
+
+# Regex that matches clearly casual/greeting messages.
+_CASUAL_RE = re.compile(
+    r"^(hi+|hey+|hello+|yo+|sup|what'?s\s*up|how\s*are\s*you|"
+    r"good\s+(morning|night|evening|day|afternoon)|"
+    r"thanks?(\s+you)?|ok+|okay|sure|cool|nice|great|lol+|haha+|"
+    r"test(ing)?|ping|who\s+are\s+you|what\s+can\s+you\s+do)\s*[?!.]*$",
+    re.IGNORECASE,
+)
+
+# Action verbs that signal the message is a task, not casual chat.
+_TASK_WORDS = frozenset({
+    "find", "search", "create", "make", "build", "write", "send",
+    "get", "show", "list", "check", "update", "delete", "run", "open",
+    "fetch", "read", "save", "add", "remove", "set", "deploy", "push",
+})
+
+
+def _is_casual(text: str) -> bool:
+    """Return True if *text* is clearly casual chat — no tools or memory needed."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    # Explicit task vocabulary always means full agent
+    lower = stripped.lower()
+    if any(w in lower.split() for w in _TASK_WORDS):
+        return False
+    # Short messages: greeting pattern OR under 15 chars with no question mark
+    if len(stripped) <= 15:
+        return bool(_CASUAL_RE.match(stripped)) or "?" not in stripped
+    return bool(_CASUAL_RE.match(stripped))
+
+
 AGENT_ID: str = os.environ.get("DA_AGENT_ID", "default")
 AUTO_APPROVE: bool = os.environ.get("DA_AUTO_APPROVE", "1").lower() in {"1", "true", "yes"}
 ENABLE_SHELL: bool = os.environ.get("DA_ENABLE_SHELL", "0").lower() in {"1", "true", "yes"}
@@ -208,6 +260,30 @@ async def _run_agent(agent: object, message: str, thread_id: str) -> str:
         return "Sorry, I encountered an error — please try again."
 
 
+async def _quick_chat(message: str) -> str:
+    """Fast direct LLM call for casual messages — no tools, no middleware overhead.
+
+    Bypasses the full agent stack entirely: no tool schemas (~13k tokens saved),
+    no memory middleware, no summarization.  Falls back to empty string on any
+    error so the caller can retry via the full agent.
+    """
+    try:
+        from langchain.chat_models import init_chat_model
+        from langchain_core.messages import HumanMessage
+        from langchain_core.messages import SystemMessage as SM
+
+        parts = CHAT_MODEL.split(":", 1)
+        llm = init_chat_model(parts[1], model_provider=parts[0]) if len(parts) == 2 else init_chat_model(CHAT_MODEL)
+        resp = await llm.ainvoke([
+            SM(content="You are a helpful AI assistant. Be friendly, concise, and natural."),
+            HumanMessage(content=message),
+        ])
+        return str(resp.content).strip() or ""
+    except Exception:
+        logger.warning("Quick chat failed, falling back to full agent", exc_info=True)
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # HeadlessApp — the minimal "app" stub that TelegramIntegration expects
 # ---------------------------------------------------------------------------
@@ -268,7 +344,17 @@ class HeadlessApp:
             # Show typing + placeholder immediately.
             await self._tg._start_thinking(telegram_chat_id)
 
-            # Run the agent.
+            # Fast path: casual messages skip the full agent stack.
+            # Saves ~13k tokens (tool schemas) and responds much faster.
+            # Only activates when a cheaper model is actually available.
+            if _is_casual(message) and CHAT_MODEL != MODEL:
+                logger.info("Fast path (casual chat, model=%s)", CHAT_MODEL)
+                response = await _quick_chat(message)
+                if response:
+                    self._tg.deliver_reply(telegram_chat_id, response)
+                    return
+
+            # Full agent path: tasks, tool calls, anything non-trivial.
             response = await _run_agent(self._agent, message, thread_id)
 
         # Deliver outside the lock so the next message can start processing
@@ -372,6 +458,7 @@ async def main() -> None:
 
     logger.info("Starting DeepAgents headless Telegram bot...")
     logger.info("  model       = %s", MODEL)
+    logger.info("  chat_model  = %s", CHAT_MODEL if CHAT_MODEL != MODEL else f"{MODEL} (no fast path)")
     logger.info("  agent_id    = %s", AGENT_ID)
     logger.info("  auto_approve= %s", AUTO_APPROVE)
     logger.info("  enable_shell= %s", ENABLE_SHELL)

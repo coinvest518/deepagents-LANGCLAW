@@ -1,5 +1,6 @@
 """Deep Agents come with planning, filesystem, and subagents."""
 
+import os
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -228,9 +229,15 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
     if interrupt_on is not None:
         gp_middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))
 
+    # Worker subagent can use a stronger model than the coordinator.
+    # Set DA_SUBAGENT_MODEL env var to override (e.g. mistral-large while
+    # coordinator runs mistral-small).  Defaults to same model as coordinator.
+    _subagent_model_spec = os.environ.get("DA_SUBAGENT_MODEL", "").strip()
+    worker_model = resolve_model(_subagent_model_spec) if _subagent_model_spec else model
+
     general_purpose_spec: SubAgent = {  # ty: ignore[missing-typed-dict-key]
         **GENERAL_PURPOSE_SUBAGENT,
-        "model": model,
+        "model": worker_model,
         "tools": tools or [],
         "middleware": gp_middleware,
     }
