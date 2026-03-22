@@ -808,7 +808,7 @@ class ModelConfig:
             default_model=models_section.get("default"),
             recent_model=models_section.get("recent"),
             default_agent=agents_section.get("default"),
-            providers=models_section.get("providers", {}),
+            providers=data.get("providers", models_section.get("providers", {})),
         )
 
         # Validate config consistency
