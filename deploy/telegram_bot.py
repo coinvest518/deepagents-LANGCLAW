@@ -97,7 +97,7 @@ def _pick_model() -> str:
     if os.environ.get("NVIDIA_API_KEY"):
         return "nvidia:meta/llama-3.3-70b-instruct"
     if os.environ.get("OPENROUTER_API_KEY"):
-        return "openrouter:deepseek/deepseek-chat-v3-0324:free"
+        return "openrouter:meta-llama/llama-3.3-70b-instruct:free"
     if os.environ.get("HUGGINGFACEHUB_API_TOKEN"):
         return "huggingface:Qwen/Qwen2.5-72B-Instruct"
     if os.environ.get("OPENAI_API_KEY"):
