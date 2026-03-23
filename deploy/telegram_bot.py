@@ -45,7 +45,6 @@ import re
 import sys
 import time
 import uuid
-from collections import deque
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -579,58 +578,58 @@ def _to_uuid(thread_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Task store — tracks every agent task (running / done / failed / incomplete)
+# Task store + conversation store — AstraDB-backed persistence
 # ---------------------------------------------------------------------------
 
-_MAX_TASKS = 200
+try:
+    from astra_store import task_store, conversation_store  # type: ignore
+    _ASTRA_STORES = True
+except Exception:
+    # Fallback: plain in-memory stores (no AstraDB configured / package absent)
+    from collections import deque as _deque
 
-class _TaskStore:
-    """In-memory ring buffer of recent agent tasks with status tracking."""
+    class _TaskStore:  # type: ignore[no-redef]
+        def __init__(self) -> None:
+            self._tasks: _deque[dict] = _deque(maxlen=200)
 
-    def __init__(self, maxlen: int = _MAX_TASKS) -> None:
-        self._tasks: deque[dict] = deque(maxlen=maxlen)
+        def start(self, task_id: str, thread_id: str, message: str, source: str = "dashboard") -> None:
+            self._tasks.append({"id": task_id, "thread_id": thread_id,
+                                 "message": message[:300], "source": source,
+                                 "status": "running", "response": "", "error": "",
+                                 "ts_start": time.time(), "ts_end": None})
 
-    def start(self, task_id: str, thread_id: str, message: str, source: str = "dashboard") -> None:
-        self._tasks.append({
-            "id":        task_id,
-            "thread_id": thread_id,
-            "message":   message[:300],
-            "source":    source,
-            "status":    "running",
-            "response":  "",
-            "error":     "",
-            "ts_start":  time.time(),
-            "ts_end":    None,
-        })
+        def _find(self, task_id: str) -> dict | None:
+            return next((t for t in self._tasks if t["id"] == task_id), None)
 
-    def _find(self, task_id: str) -> dict | None:
-        for t in self._tasks:
-            if t["id"] == task_id:
-                return t
-        return None
+        def done(self, task_id: str, response: str) -> None:
+            t = self._find(task_id)
+            if t:
+                t["status"] = "done"; t["response"] = response[:600]; t["ts_end"] = time.time()
 
-    def done(self, task_id: str, response: str) -> None:
-        t = self._find(task_id)
-        if t:
-            t["status"]   = "done"
-            t["response"] = response[:600]
-            t["ts_end"]   = time.time()
+        def fail(self, task_id: str, error: str) -> None:
+            t = self._find(task_id)
+            if t:
+                t["status"] = "incomplete"; t["error"] = str(error)[:300]; t["ts_end"] = time.time()
 
-    def fail(self, task_id: str, error: str) -> None:
-        t = self._find(task_id)
-        if t:
-            t["status"] = "incomplete"   # incomplete = failed, can be retried
-            t["error"]  = str(error)[:300]
-            t["ts_end"] = time.time()
+        def recent(self, n: int = 50) -> list[dict]:
+            return list(reversed(list(self._tasks)))[:n]
 
-    def recent(self, n: int = 50) -> list[dict]:
-        return list(reversed(list(self._tasks)))[:n]
+        def incomplete(self) -> list[dict]:
+            return [t for t in self._tasks if t["status"] == "incomplete"]
 
-    def incomplete(self) -> list[dict]:
-        return [t for t in self._tasks if t["status"] == "incomplete"]
+        def load_from_astra(self) -> None:
+            pass  # no-op in fallback mode
 
+    class _ConvStore:  # type: ignore[no-redef]
+        def append(self, thread_id: str, role: str, text: str) -> None:
+            pass
 
-task_store = _TaskStore()
+        def get_history(self, thread_id: str, limit: int = 100) -> list[dict]:
+            return []
+
+    task_store = _TaskStore()
+    conversation_store = _ConvStore()
+    _ASTRA_STORES = False
 
 
 def _check_secret(request: object) -> bool:
@@ -678,6 +677,7 @@ async def start_api_server(agent: object) -> None:
 
         task_id = str(uuid.uuid4())
         task_store.start(task_id, thread_id, message, source="dashboard")
+        conversation_store.append(thread_id, "user", message)
 
         async with _api_locks[thread_id]:
             try:
@@ -685,6 +685,7 @@ async def start_api_server(agent: object) -> None:
                     response = await _quick_chat(message)
                     if response:
                         task_store.done(task_id, response)
+                        conversation_store.append(thread_id, "agent", response)
                         return web.json_response({
                             "response":  response,
                             "thread_id": thread_id,
@@ -693,6 +694,7 @@ async def start_api_server(agent: object) -> None:
                         })
                 response = await _run_agent(agent, message, thread_id)
                 task_store.done(task_id, response)
+                conversation_store.append(thread_id, "agent", response)
                 return web.json_response({
                     "response":  response,
                     "thread_id": thread_id,
@@ -728,9 +730,7 @@ async def start_api_server(agent: object) -> None:
             return web.json_response({"error": "thread_id required"}, status=400)
         try:
             state = await agent.aget_state({"configurable": {"thread_id": thread_id}})  # type: ignore
-            if state is None:
-                return web.json_response({"messages": [], "thread_id": thread_id})
-            raw_msgs = getattr(state, "values", {}).get("messages", []) or []
+            raw_msgs = [] if state is None else (getattr(state, "values", {}).get("messages", []) or [])
             messages = []
             for msg in raw_msgs:
                 if isinstance(msg, dict):
@@ -750,10 +750,18 @@ async def start_api_server(agent: object) -> None:
                     messages.append({"role": "user",  "text": str(content)})
                 elif role in ("ai", "AIMessage") and not tools:
                     messages.append({"role": "agent", "text": str(content)})
+
+            # If LangGraph state is empty (e.g. after Render restart), fall back
+            # to the AstraDB conversation store which persists across restarts.
+            if not messages:
+                messages = conversation_store.get_history(thread_id)
+
             return web.json_response({"messages": messages, "thread_id": thread_id})
         except Exception as exc:
             logger.exception("HTTP /history error")
-            return web.json_response({"error": str(exc), "messages": []}, status=500)
+            # Best-effort: return whatever AstraDB has
+            fallback = conversation_store.get_history(thread_id)
+            return web.json_response({"messages": fallback, "thread_id": thread_id})
 
     app = web.Application()
     app.router.add_get("/health", health)
@@ -805,6 +813,12 @@ async def main() -> None:
         logger.info("  model_router = %d providers configured", len(status))
         for name, info in status.items():
             logger.info("    %-25s %s", name, info["spec"])
+    except Exception:
+        pass
+
+    # Pre-populate in-memory task mirror from AstraDB (no-op if not configured)
+    try:
+        task_store.load_from_astra()
     except Exception:
         pass
 
