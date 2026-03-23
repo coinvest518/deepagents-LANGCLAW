@@ -334,7 +334,9 @@ async def _quick_chat(message: str) -> str:
                 "stream": False
             }
 
-            response = requests.post(f"{ollama_url}/api/chat", json=chat_data, timeout=30)
+            response = await asyncio.to_thread(
+                requests.post, f"{ollama_url}/api/chat", json=chat_data, timeout=30
+            )
             if response.status_code == 200:
                 result = response.json()
                 return str(result.get("message", {}).get("content", "")).strip() or ""
