@@ -150,38 +150,39 @@ def _pick_chat_model() -> str:
 
 CHAT_MODEL: str = _pick_chat_model()
 
-# Regex that matches clearly casual/greeting messages.
-_CASUAL_RE = re.compile(
-    r"^(hi+|hey+|hello+|yo+|sup|what'?s\s*up|how\s*are\s*you|"
-    r"good\s+(morning|night|evening|day|afternoon)|"
-    r"thanks?(\s+you)?|ok+|okay|sure|cool|nice|great|lol+|haha+|"
-    r"test(ing)?|ping|who\s+are\s+you|what\s+can\s+you\s+do)\s*[?!.]*$",
-    re.IGNORECASE,
-)
-
-# Action verbs that signal the message is a task, not casual chat.
+# Action verbs that clearly signal a task needing the full agent.
 _TASK_WORDS = frozenset({
     "find", "search", "create", "make", "build", "write", "send",
     "get", "show", "list", "check", "update", "delete", "run", "open",
     "fetch", "read", "save", "add", "remove", "set", "deploy", "push",
+    "generate", "summarize", "analyze", "fix", "debug",
+    "install", "download", "upload", "convert", "translate", "edit",
+    "rename", "move", "copy", "compare", "calculate", "count",
 })
 
 
-def _is_casual(text: str) -> bool:
-    """Return True if *text* is clearly casual chat — no tools or memory needed."""
-    stripped = text.strip()
-    if not stripped:
-        return False
-    # Explicit task vocabulary always means full agent
-    lower = stripped.lower()
-    if any(w in lower.split() for w in _TASK_WORDS):
-        return False
-    # Short messages (≤20 chars) with no task words are always casual —
-    # task words are already filtered above, so a short question like
-    # "You back Ai?" or "You there?" is not a task.
-    if len(stripped) <= 20:
-        return True
-    return bool(_CASUAL_RE.match(stripped))
+def _needs_full_agent(text: str) -> bool:
+    """Return True when message clearly needs tools — skip Musa, go straight to NVIDIA."""
+    lower = text.strip().lower()
+    return len(text.strip()) > 200 or any(w in lower.split() for w in _TASK_WORDS)
+
+
+# ---------------------------------------------------------------------------
+# Musa soul — loaded once, injected into every quick-chat call
+# ---------------------------------------------------------------------------
+_SOUL_CACHE: str | None = None
+
+
+def _load_soul() -> str:
+    global _SOUL_CACHE
+    if _SOUL_CACHE is None:
+        soul_path = Path(__file__).parent / "agent_soul.md"
+        _SOUL_CACHE = (
+            soul_path.read_text(encoding="utf-8")
+            if soul_path.exists()
+            else "You are Musa, Daniel's personal AI assistant for FDWA (Futuristic Digital Wealth Agency)."
+        )
+    return _SOUL_CACHE
 
 
 AGENT_ID: str = os.environ.get("DA_AGENT_ID", "default")
@@ -310,62 +311,58 @@ async def _run_agent(agent: object, message: str, thread_id: str) -> str:
         return "Sorry, I encountered an error — please try again."
 
 
-async def _quick_chat(message: str) -> str:
-    """Fast direct LLM call for casual messages — no tools, no middleware overhead.
+async def _quick_chat(message: str) -> tuple[str, bool]:
+    """Ask Musa (Ollama) with soul context. Returns (reply, handoff).
 
-    Bypasses the full agent stack entirely: no tool schemas (~13k tokens saved),
-    no memory middleware, no summarization.  Falls back to empty string on any
-    error so the caller can retry via the full agent.
+    Routing is handled by _needs_full_agent() before this is called.
+    Musa just answers with personality and FDWA context.
+    Falls back to handoff=True on any error so nothing is dropped.
     """
+    soul = _load_soul()
     try:
-        import requests
-        import json
-
-        # Check if we're using Ollama
         if CHAT_MODEL.startswith("ollama:"):
+            import json as _json
             model_name = CHAT_MODEL.replace("ollama:", "")
             ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://13.222.51.51:11434")
-
-            # Use direct HTTP request to Ollama API
-            chat_data = {
+            body = _json.dumps({
                 "model": model_name,
                 "messages": [
-                    {"role": "system", "content": "You are a helpful AI assistant. Be friendly, concise, and natural."},
-                    {"role": "user", "content": message}
+                    {"role": "system", "content": soul},
+                    {"role": "user", "content": message},
                 ],
-                "stream": False
-            }
-
-            response = await asyncio.to_thread(
-                requests.post, f"{ollama_url}/api/chat", json=chat_data, timeout=30
+                "stream": False,
+            })
+            resp = await asyncio.to_thread(
+                requests.post,
+                f"{ollama_url}/api/chat",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                timeout=45,
             )
-            if response.status_code == 200:
-                result = response.json()
-                return str(result.get("message", {}).get("content", "")).strip() or ""
+            if resp.status_code == 200:
+                text = resp.json().get("message", {}).get("content", "").strip()
             else:
-                logger.warning("Ollama API returned status %d: %s", response.status_code, response.text)
-                return ""
-
-        # For other models, try the original LangChain approach
-        try:
+                logger.warning("Ollama returned %d — handing off", resp.status_code)
+                return ("", True)
+        else:
+            # Non-Ollama fallback (Cerebras, Mistral, etc.)
             from langchain.chat_models import init_chat_model
             from langchain_core.messages import HumanMessage
             from langchain_core.messages import SystemMessage as SM
-
             parts = CHAT_MODEL.split(":", 1)
-            llm = init_chat_model(parts[1], model_provider=parts[0]) if len(parts) == 2 else init_chat_model(CHAT_MODEL)
-            resp = await llm.ainvoke([
-                SM(content="You are a helpful AI assistant. Be friendly, concise, and natural."),
-                HumanMessage(content=message),
-            ])
-            return str(resp.content).strip() or ""
-        except Exception as e:
-            logger.warning("LangChain quick chat failed: %s", e)
-            return ""
+            llm = (
+                init_chat_model(parts[1], model_provider=parts[0])
+                if len(parts) == 2
+                else init_chat_model(CHAT_MODEL)
+            )
+            r = await llm.ainvoke([SM(content=soul), HumanMessage(content=message)])
+            text = str(r.content).strip()
 
-    except Exception as e:
-        logger.warning("Quick chat failed, falling back to full agent", exc_info=True)
-        return ""
+        return (text, False) if text else ("", True)
+
+    except Exception:
+        logger.warning("Musa quick-chat failed — handing off to full agent", exc_info=True)
+        return ("", True)
 
 
 # ---------------------------------------------------------------------------
@@ -428,16 +425,16 @@ class HeadlessApp:
             # Show typing + placeholder immediately.
             await self._tg._start_thinking(telegram_chat_id)
 
-            # Fast path: casual messages skip the full agent stack.
-            # Saves ~13k tokens (tool schemas) and responds much faster.
-            # Only activates when a cheaper model is actually available.
-            if _is_casual(message) and CHAT_MODEL != MODEL:
-                logger.info("Fast path (casual chat, model=%s)", CHAT_MODEL)
-                response = await _quick_chat(message)
-                if response:
-                    logger.info("Quick-chat reply to chat_id=%d: %.80s", telegram_chat_id, response)
-                    self._tg.deliver_reply(telegram_chat_id, response)
+            # Musa routing: ask Musa first unless message clearly needs full agent.
+            # Musa reads the soul file and decides: answer / HANDOFF / ASK.
+            if not _needs_full_agent(message) and CHAT_MODEL != MODEL:
+                logger.info("Musa routing (model=%s): %.60s", CHAT_MODEL, message)
+                musa_reply, handoff = await _quick_chat(message)
+                if not handoff:
+                    logger.info("Musa reply to chat_id=%d: %.80s", telegram_chat_id, musa_reply)
+                    self._tg.deliver_reply(telegram_chat_id, musa_reply)
                     return
+                logger.info("Musa HANDOFF → full agent for chat_id=%d", telegram_chat_id)
 
             # Full agent path: tasks, tool calls, anything non-trivial.
             response = await _run_agent(self._agent, message, thread_id)
