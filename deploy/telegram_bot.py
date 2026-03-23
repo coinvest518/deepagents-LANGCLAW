@@ -74,40 +74,51 @@ logger = logging.getLogger("deepagents.telegram_bot")
 # ---------------------------------------------------------------------------
 
 def _pick_model() -> str:
-    """Return DA_MODEL if set, otherwise pick the best available model
-    based on which API keys are present in the environment.
+    """Pick the best available model using the smart router.
 
-    Priority order is tuned for tool-calling ability and instruction-following
-    with large system prompts (15k+ tokens of tools + prompt):
-      1. Mistral — mistral-large is purpose-built for function calling and
-                   follows complex tool instructions reliably even in large contexts
-      2. NVIDIA  — llama-3.3-70b is capable but can misfire compact_conversation
-                   preemptively when the system prompt is large
-      3. OpenRouter — free DeepSeek models, good tool calling
-      4. HuggingFace — Qwen2.5-72B, reliable tool calling
-      5. OpenAI   — gpt-4o (if key present)
-      6. Anthropic — claude-sonnet (if key present)
-      7. Google   — gemini-2.0-flash (if key present)
+    If DA_MODEL is explicitly set, honour it (manual override).
+    Otherwise use ModelRouter which tracks free-tier budgets and picks
+    the provider with the most remaining capacity.
     """
     explicit = os.environ.get("DA_MODEL", "").strip()
     if explicit:
         return explicit
-    if os.environ.get("MISTRAL_API_KEY"):
-        return "mistralai:mistral-large-latest"
-    if os.environ.get("NVIDIA_API_KEY"):
-        return "nvidia:meta/llama-3.3-70b-instruct"
-    if os.environ.get("OPENROUTER_API_KEY"):
-        return "openrouter:meta-llama/llama-3.3-70b-instruct:free"
-    if os.environ.get("HUGGINGFACEHUB_API_TOKEN"):
-        return "huggingface:Qwen/Qwen2.5-72B-Instruct"
-    if os.environ.get("OPENAI_API_KEY"):
-        return "openai:gpt-4o"
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return "anthropic:claude-sonnet-4-6"
-    if os.environ.get("GOOGLE_API_KEY"):
-        return "google_genai:gemini-2.0-flash"
-    # Pass empty string — let the server-side auto-detection handle it
+    # Smart router: checks which keys exist + remaining per-minute quota
+    from model_router import router as _router
+    picked = _router.pick("main")
+    if picked:
+        return picked
+    # Absolute fallback: first available key in classic order
+    for env_key, spec in [
+        ("MISTRAL_API_KEY",        "mistralai:mistral-large-latest"),
+        ("NVIDIA_API_KEY",         "nvidia:meta/llama-3.3-70b-instruct"),
+        ("OPENROUTER_API_KEY",     "openrouter:deepseek/deepseek-chat-v3-0324:free"),
+        ("HUGGINGFACEHUB_API_TOKEN", "huggingface:Qwen/Qwen2.5-72B-Instruct"),
+        ("CEREBRAS_API_KEY",       "cerebras:llama3.1-8b"),
+        ("ANTHROPIC_API_KEY",      "anthropic:claude-sonnet-4-6"),
+        ("OPENAI_API_KEY",         "openai:gpt-4o"),
+        ("GOOGLE_API_KEY",         "google_genai:gemini-2.0-flash"),
+    ]:
+        if os.environ.get(env_key):
+            return spec
     return ""
+
+
+def _pick_subagent_model() -> str:
+    """Pick the subagent model — prefers a DIFFERENT provider than the main agent.
+
+    This is called just before server_session starts so that subagents draw
+    from a separate provider's token bucket, preventing the main agent and its
+    subagents from exhausting the same rate-limit quota simultaneously.
+    """
+    explicit = os.environ.get("DA_SUBAGENT_MODEL", "").strip()
+    if explicit:
+        return explicit
+    from model_router import router as _router
+    # pick_subagents returns [subagent0, subagent1, ...]; we take the first
+    subs = _router.pick_subagents(n=2)
+    # Use the second option (most likely a different provider than main)
+    return subs[1] if len(subs) > 1 else (subs[0] if subs else "")
 
 
 MODEL: str = _pick_model()
@@ -228,6 +239,21 @@ def _text_from_message(msg: object) -> str:
     return ""
 
 
+def _count_tokens_in_state(messages: list) -> int:
+    """Sum up token usage from all AI messages in *messages*."""
+    total = 0
+    for msg in messages:
+        if isinstance(msg, dict):
+            usage = msg.get("usage_metadata") or msg.get("response_metadata", {})
+        else:
+            usage = getattr(msg, "usage_metadata", None) or {}
+        if isinstance(usage, dict):
+            total += usage.get("total_tokens", 0) or (
+                usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+            )
+    return total
+
+
 async def _run_agent(agent: object, message: str, thread_id: str) -> str:
     """Run the agent for *message* and return the complete text response.
 
@@ -250,6 +276,17 @@ async def _run_agent(agent: object, message: str, thread_id: str) -> str:
         if state is None:
             return "No response received."
         messages = getattr(state, "values", {}).get("messages", [])
+
+        # Record token usage so the router can track budget consumption
+        try:
+            from model_router import router as _router
+            tokens_used = _count_tokens_in_state(messages)
+            if tokens_used > 0:
+                _router.record(MODEL, tokens_used)
+                logger.debug("ModelRouter: recorded %d tokens for %s", tokens_used, MODEL)
+        except Exception:
+            pass  # never let tracking break the response
+
         for msg in reversed(messages):
             text = _text_from_message(msg)
             if text.strip():
@@ -600,12 +637,29 @@ async def main() -> None:
         )
         sys.exit(1)
 
+    # Pick subagent model — different provider than main to avoid shared rate limits.
+    # Sets DA_SUBAGENT_MODEL in env so graph.py picks it up when building subagents.
+    subagent_model = _pick_subagent_model()
+    if subagent_model and subagent_model != MODEL:
+        os.environ["DA_SUBAGENT_MODEL"] = subagent_model
+        logger.info("  subagent_model = %s", subagent_model)
+
     logger.info("Starting DeepAgents headless Telegram bot...")
     logger.info("  model       = %s", MODEL)
     logger.info("  chat_model  = %s", CHAT_MODEL if CHAT_MODEL != MODEL else f"{MODEL} (no fast path)")
     logger.info("  agent_id    = %s", AGENT_ID)
     logger.info("  auto_approve= %s", AUTO_APPROVE)
     logger.info("  enable_shell= %s", ENABLE_SHELL)
+
+    # Log model router status at startup
+    try:
+        from model_router import router as _router
+        status = _router.status()
+        logger.info("  model_router = %d providers configured", len(status))
+        for name, info in status.items():
+            logger.info("    %-25s %s", name, info["spec"])
+    except Exception:
+        pass
 
     async with server_session(
         assistant_id=AGENT_ID,

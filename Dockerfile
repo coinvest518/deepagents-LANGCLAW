@@ -97,10 +97,11 @@ ENV LANGSMITH_API_KEY=local
 #   Cron daemon (run scheduled jobs):
 #     python -m deepagents_cli cron daemon
 #
-# Default model: NVIDIA Llama-3.3-70B — reliable tool calling, no 50k tokens/min cap.
-# Override in Render env vars with DA_MODEL=mistralai:mistral-large-latest to use Mistral.
-ENV DA_MODEL="nvidia:meta/llama-3.3-70b-instruct"
-ENV DA_SUBAGENT_MODEL="openrouter:deepseek/deepseek-chat-v3-0324:free"
+# DA_MODEL intentionally unset — ModelRouter (deploy/model_router.py) selects
+# the best available provider at runtime based on token budget tracking.
+# Set DA_MODEL in Render env vars ONLY if you want to force a specific model.
+ENV DA_MODEL=""
+ENV DA_SUBAGENT_MODEL=""
 ENV START_CMD="python deploy/telegram_bot.py"
 
 CMD ["/bin/sh", "-c", "${START_CMD}"]
