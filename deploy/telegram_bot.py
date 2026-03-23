@@ -1238,7 +1238,7 @@ async def main() -> None:
         enable_shell=ENABLE_SHELL,
         interactive=True,
         enable_memory=True,
-        enable_skills=False,
+        enable_skills=True,
         no_mcp=True,
     ) as (agent, _server):
         bot = HeadlessBot(agent=agent)
