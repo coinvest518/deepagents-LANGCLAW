@@ -10,7 +10,7 @@ Free-tier budget:
 
 Environment variables (all optional — voice features silently disabled if absent):
   ELEVENLABS_API_KEY    Your ElevenLabs API key
-  ELEVEN_LABS_VOICE     Voice ID (default: SgG3x729SgH346SJc0ck)
+  ELEVEN_LABS_VOICE_ID  Voice ID (required — set in .env or Render env vars)
   ELEVEN_LABS_MODEL     Model ID (default: eleven_turbo_v2)
   DA_VOICE_REPLY        "1" to always reply with audio (default: only when
                         user sent a voice message)
@@ -32,7 +32,7 @@ logger = logging.getLogger("deepagents.voice")
 # ---------------------------------------------------------------------------
 
 _ELEVEN_KEY   = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_LABS_API_KEY", "")
-_VOICE_ID     = os.environ.get("ELEVEN_LABS_VOICE", "SgG3x729SgH346SJc0ck")
+_VOICE_ID     = os.environ.get("ELEVEN_LABS_VOICE_ID") or os.environ.get("ELEVEN_LABS_VOICE", "")
 _MODEL_ID     = os.environ.get("ELEVEN_LABS_MODEL", "eleven_turbo_v2")
 _MAX_CHARS    = int(os.environ.get("DA_TTS_MAX_CHARS", "400"))
 _MONTHLY_CAP  = 9_500   # chars/month — leaves 500 buffer from the 10k free tier
