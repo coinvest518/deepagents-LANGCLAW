@@ -45,11 +45,13 @@ FREE_TIER_TPM: dict[str, int | None] = {
 # ---------------------------------------------------------------------------
 _TOOL_MODELS: list[tuple[str, str, str]] = [
     # (provider_key, model_spec,                                  display_name)
-    ("mistralai",   "mistralai:mistral-large-latest",            "Mistral Large"),
-    ("nvidia",      "nvidia:meta/llama-3.3-70b-instruct",        "NVIDIA Llama-3.3-70B"),
-    ("cerebras",    "cerebras:llama3.1-8b",                      "Cerebras Llama-3.1-8B"),
-    ("openrouter",  "openrouter:deepseek/deepseek-chat-v3-0324:free", "DeepSeek Chat v3"),
-    ("openrouter",  "openrouter:deepseek/deepseek-r1:free",      "DeepSeek R1"),
+    # --- HIGH-QUOTA strong models first — handle large tasks (website, Notion, etc.) ---
+    ("nvidia",      "nvidia:meta/llama-3.3-70b-instruct",        "NVIDIA Llama-3.3-70B"),      # 400k TPM, 70B
+    ("cerebras",    "cerebras:llama3.1-8b",                      "Cerebras Llama-3.1-8B"),     # 600k TPM, very fast
+    ("openrouter",  "openrouter:deepseek/deepseek-chat-v3-0324:free", "DeepSeek Chat v3"),      # no TPM cap
+    ("openrouter",  "openrouter:deepseek/deepseek-r1:free",      "DeepSeek R1"),                # no TPM cap
+    # --- Mistral: good for small tool calls but LOW quota (50k TPM) — used as fallback ---
+    ("mistralai",   "mistralai:mistral-large-latest",            "Mistral Large"),              # 50k TPM only
     ("huggingface", "huggingface:Qwen/Qwen2.5-72B-Instruct",     "Qwen2.5-72B"),
     ("anthropic",   "anthropic:claude-sonnet-4-6",               "Claude Sonnet 4.6"),
     ("openai",      "openai:gpt-4o",                             "GPT-4o"),

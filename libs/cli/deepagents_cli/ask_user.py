@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
+from pydantic import BeforeValidator
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -25,6 +27,18 @@ from pydantic import Field
 from typing_extensions import TypedDict
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_choice(v: Any) -> Any:
+    """Accept either a plain string or a Choice dict.
+
+    Some models (e.g. Mistral) send choices as bare strings instead of
+    ``{"value": "..."}`` dicts.  This validator normalises both forms so
+    Pydantic validation never rejects the tool call.
+    """
+    if isinstance(v, str):
+        return {"value": v}
+    return v
 
 
 class Choice(TypedDict):
@@ -50,7 +64,7 @@ class Question(TypedDict):
 
     choices: NotRequired[
         Annotated[
-            list[Choice],
+            list[Annotated[Choice, BeforeValidator(_coerce_choice)]],
             Field(
                 description=(
                     "Options for multiple_choice questions. An 'Other' free-form "

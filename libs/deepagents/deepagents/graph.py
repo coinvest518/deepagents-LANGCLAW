@@ -85,19 +85,26 @@ def get_default_model() -> BaseChatModel:
     import os
     from langchain.chat_models import init_chat_model
 
-    if os.environ.get("MISTRAL_API_KEY"):
-        return init_chat_model("mistralai:mistral-large-latest")
+    # Priority: high-quota/strong models first; Mistral last (50k TPM hits fast on large tasks)
     if os.environ.get("NVIDIA_API_KEY"):
         return init_chat_model("nvidia:meta/llama-3.3-70b-instruct")
-    if os.environ.get("OPENAI_API_KEY"):
-        return init_chat_model("openai:gpt-4o")
+    if os.environ.get("CEREBRAS_API_KEY"):
+        return init_chat_model("cerebras:llama3.1-8b")
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return init_chat_model("openrouter:deepseek/deepseek-chat-v3-0324:free")
+    if os.environ.get("MISTRAL_API_KEY"):
+        return init_chat_model("mistralai:mistral-large-latest")
     if os.environ.get("ANTHROPIC_API_KEY"):
         return init_chat_model("anthropic:claude-sonnet-4-6")
+    if os.environ.get("HUGGINGFACEHUB_API_TOKEN"):
+        return init_chat_model("huggingface:Qwen/Qwen2.5-72B-Instruct")
+    if os.environ.get("OPENAI_API_KEY"):
+        return init_chat_model("openai:gpt-4o")
     if os.environ.get("GOOGLE_API_KEY"):
         return init_chat_model("google_genai:gemini-2.0-flash")
     msg = (
-        "No LLM API key found. Set one of: MISTRAL_API_KEY, NVIDIA_API_KEY, "
-        "OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY."
+        "No LLM API key found. Set one of: NVIDIA_API_KEY, CEREBRAS_API_KEY, "
+        "OPENROUTER_API_KEY, MISTRAL_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY."
     )
     raise RuntimeError(msg)
 

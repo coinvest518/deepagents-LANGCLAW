@@ -90,16 +90,16 @@ def _pick_model() -> str:
     picked = _router.pick("main")
     if picked:
         return picked
-    # Absolute fallback: first available key in classic order
+    # Absolute fallback (router unavailable): strong/high-quota models first
     for env_key, spec in [
-        ("MISTRAL_API_KEY",        "mistralai:mistral-large-latest"),
-        ("NVIDIA_API_KEY",         "nvidia:meta/llama-3.3-70b-instruct"),
-        ("OPENROUTER_API_KEY",     "openrouter:deepseek/deepseek-chat-v3-0324:free"),
+        ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),
+        ("CEREBRAS_API_KEY",         "cerebras:llama3.1-8b"),
+        ("OPENROUTER_API_KEY",       "openrouter:deepseek/deepseek-chat-v3-0324:free"),
+        ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),
         ("HUGGINGFACEHUB_API_TOKEN", "huggingface:Qwen/Qwen2.5-72B-Instruct"),
-        ("CEREBRAS_API_KEY",       "cerebras:llama3.1-8b"),
-        ("ANTHROPIC_API_KEY",      "anthropic:claude-sonnet-4-6"),
-        ("OPENAI_API_KEY",         "openai:gpt-4o"),
-        ("GOOGLE_API_KEY",         "google_genai:gemini-2.0-flash"),
+        ("ANTHROPIC_API_KEY",        "anthropic:claude-sonnet-4-6"),
+        ("OPENAI_API_KEY",           "openai:gpt-4o"),
+        ("GOOGLE_API_KEY",           "google_genai:gemini-2.0-flash"),
     ]:
         if os.environ.get(env_key):
             return spec
@@ -127,16 +127,22 @@ MODEL: str = _pick_model()
 
 
 def _pick_chat_model() -> str:
-    """Return the cheapest available model for casual chat (no tools needed).
+    """Return the fastest available model for casual chat (no tools needed).
 
-    Priority: Ollama (free/self-hosted) → Mistral Small (cheap) → same as MODEL.
-    When the result equals MODEL the fast path is skipped entirely — no point
-    routing to the same model without tools if we already pay per token.
+    Priority:
+      1. Cerebras  — fastest inference available (600k TPM free, llama3.1-8b)
+      2. Ollama    — free self-hosted (if OLLAMA_BASE_URL is configured)
+      3. Mistral Small — cheap fallback
+      4. Same as MODEL — no dedicated fast path
+
+    When result equals MODEL the fast path is skipped — no point making a
+    separate call to the same model just to skip tools.
     """
+    if os.environ.get("CEREBRAS_API_KEY"):
+        return "cerebras:llama3.1-8b"
     if os.environ.get("OLLAMA_BASE_URL"):
         return "ollama:llama3.2:1b"
     if os.environ.get("MISTRAL_API_KEY"):
-        # Small is ~6x cheaper than Large for casual replies
         return "mistralai:mistral-small-latest"
     return MODEL  # no cheaper option available → skip fast path
 
@@ -445,6 +451,86 @@ class HeadlessBot:
         self._tg = tg
         self._app = app
 
+    async def _handle_voice(self, msg: dict, chat_id: int) -> None:
+        """Transcribe a Telegram voice message and run it through the agent.
+
+        Flow:
+          1. Download the .ogg from Telegram
+          2. Transcribe with faster-whisper (local, free, unlimited)
+          3. Run transcription through the agent
+          4. If ElevenLabs quota available, synthesize reply → sendAudio
+          5. Always also send the text reply so nothing is lost
+        """
+        from voice_handler import transcribe, synthesize, tts_available, stt_available
+
+        file_id = msg["voice"]["file_id"]
+        duration = msg["voice"].get("duration", 0)
+
+        if not stt_available():
+            self._tg.send_message(
+                chat_id,
+                "🎤 Voice received but <code>faster-whisper</code> is not installed.\n"
+                "Add it to requirements and redeploy.",
+            )
+            return
+
+        await self._tg._start_thinking(chat_id)
+
+        # Download the .ogg file
+        try:
+            resp = requests.get(f"{BASE_URL}/getFile", params={"file_id": file_id}, timeout=15)
+            resp.raise_for_status()
+            tg_path = resp.json()["result"]["file_path"]
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{tg_path}"
+            _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            ogg_path = _UPLOAD_DIR / f"voice_{file_id}.ogg"
+            dl = requests.get(file_url, timeout=60)
+            dl.raise_for_status()
+            ogg_path.write_bytes(dl.content)
+        except Exception as exc:
+            self._tg.send_message(chat_id, f"❌ Could not download voice message: {exc}")
+            return
+
+        # Transcribe
+        text = await asyncio.to_thread(transcribe, ogg_path)
+        try:
+            ogg_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        if not text:
+            self._tg.send_message(chat_id, "🎤 Sorry, I couldn't understand the audio.")
+            return
+
+        logger.info("Voice transcribed (chat_id=%d, %ds): %s", chat_id, duration, text[:80])
+        self._tg.send_message(chat_id, f"🎤 <i>{text}</i>")
+
+        # Run through agent (same path as text messages)
+        thread_id = self._app._get_thread_id(chat_id)
+        if chat_id not in self._app._locks:
+            self._app._locks[chat_id] = asyncio.Lock()
+
+        async with self._app._locks[chat_id]:
+            response = await _run_agent(self._app._agent, text, thread_id)
+
+        # Reply with voice if quota allows, otherwise text only
+        if tts_available() and len(response) <= int(os.environ.get("DA_TTS_MAX_CHARS", "400")):
+            audio = await asyncio.to_thread(synthesize, response)
+            if audio:
+                try:
+                    requests.post(
+                        f"{BASE_URL}/sendAudio",
+                        data={"chat_id": chat_id, "title": "Agent reply"},
+                        files={"audio": ("reply.mp3", audio, "audio/mpeg")},
+                        timeout=30,
+                    )
+                    return  # audio sent — done
+                except Exception as exc:
+                    logger.warning("sendAudio failed: %s", exc)
+
+        # Fallback: text reply
+        self._tg.deliver_reply(chat_id, response)
+
     async def _handle_document(self, msg: dict, chat_id: int) -> None:
         """Download a file sent to the bot and ingest it into the knowledge base."""
         doc = msg.get("document", {})
@@ -527,6 +613,11 @@ class HeadlessBot:
                             self._app.reset_thread(chat_id)
                             self._tg.chat_history.pop(chat_id, None)
                             self._tg.send_message(chat_id, "Conversation reset.")
+                            continue
+
+                        # Handle voice messages → transcribe + agent + optional TTS reply
+                        if chat_id and msg.get("voice"):
+                            await self._handle_voice(msg, chat_id)
                             continue
 
                         # Handle document uploads → ingest into knowledge base
