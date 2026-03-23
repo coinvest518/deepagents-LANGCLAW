@@ -11,55 +11,115 @@ async function ls(path: string, body?: object) {
     body: body ? JSON.stringify(body) : undefined,
     next: { revalidate: 0 },
   })
-  if (!res.ok) return null
+  if (!res.ok) {
+    console.error('LangSmith error', res.status, await res.text().catch(() => ''))
+    return null
+  }
   return res.json()
+}
+
+/** Extract model name from the run's metadata / inputs */
+function extractModel(r: any): string {
+  return (
+    r.extra?.metadata?.ls_model_name ||
+    r.extra?.metadata?.model_name ||
+    r.extra?.invocation_params?.model ||
+    r.inputs?.model_name ||
+    r.inputs?.model ||
+    ''
+  )
+}
+
+/** Latency in seconds from start_time / end_time strings */
+function latency(r: any): number {
+  if (!r.start_time || !r.end_time) return 0
+  return Math.round((new Date(r.end_time).getTime() - new Date(r.start_time).getTime()) / 100) / 10
+}
+
+function mapRun(r: any) {
+  return {
+    id: r.id,
+    name: r.name,
+    run_type: r.run_type,
+    status: r.status,
+    start_time: r.start_time,
+    end_time: r.end_time,
+    latency_s: latency(r),
+    model: extractModel(r),
+    total_tokens: r.total_tokens || 0,
+    prompt_tokens: r.prompt_tokens || 0,
+    completion_tokens: r.completion_tokens || 0,
+    error: r.error || null,
+    parent_run_id: r.parent_run_id || null,
+    // short previews for the activity stream
+    inputs_preview: extractInputText(r.inputs),
+    outputs_preview: extractOutputText(r.outputs),
+  }
+}
+
+function extractInputText(inputs: any): string {
+  if (!inputs) return ''
+  // LangGraph passes messages array
+  const msgs = inputs.messages || inputs.input?.messages
+  if (Array.isArray(msgs) && msgs.length > 0) {
+    const last = msgs[msgs.length - 1]
+    const txt = typeof last === 'string' ? last : last?.content
+    return String(txt || '').slice(0, 120)
+  }
+  return JSON.stringify(inputs).slice(0, 120)
+}
+
+function extractOutputText(outputs: any): string {
+  if (!outputs) return ''
+  const msgs = outputs.messages || outputs.output?.messages
+  if (Array.isArray(msgs) && msgs.length > 0) {
+    const last = msgs[msgs.length - 1]
+    const txt = typeof last === 'string' ? last : last?.content
+    return String(txt || '').slice(0, 120)
+  }
+  if (outputs.output) return String(outputs.output).slice(0, 120)
+  return JSON.stringify(outputs).slice(0, 120)
 }
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
   const type = searchParams.get('type') || 'runs'
 
+  if (!LS_KEY) {
+    return NextResponse.json({ error: 'LANGSMITH_API_KEY not configured' }, { status: 503 })
+  }
+
   try {
     if (type === 'runs') {
+      // Root-level traces only (is_root filters out every internal tool/subagent step)
       const data = await ls('/runs/query', {
         session_name: LS_PROJECT,
-        limit: 20,
-        order: 'desc',
+        is_root: true,
+        limit: 25,
       })
-      const runs = (data?.runs || []).map((r: any) => ({
-        id: r.id,
-        name: r.name,
-        run_type: r.run_type,
-        status: r.status,
-        start_time: r.start_time,
-        end_time: r.end_time,
-        total_tokens: r.total_tokens || 0,
-        prompt_tokens: r.prompt_tokens || 0,
-        completion_tokens: r.completion_tokens || 0,
-        error: r.error,
-        parent_run_id: r.parent_run_id,
-        inputs_preview: JSON.stringify(r.inputs)?.slice(0, 120),
-        outputs_preview: JSON.stringify(r.outputs)?.slice(0, 120),
-      }))
+      const runs = (data?.runs || []).map(mapRun)
       return NextResponse.json({ runs })
     }
 
     if (type === 'stats') {
-      // Aggregate token usage over last 7 days
+      // Pull root runs for stats (avoids counting sub-steps multiple times)
       const data = await ls('/runs/query', {
         session_name: LS_PROJECT,
+        is_root: true,
         limit: 100,
-        order: 'desc',
       })
-      const runs = data?.runs || []
-      const totalTokens = runs.reduce((s: number, r: any) => s + (r.total_tokens || 0), 0)
+      const runs: any[] = data?.runs || []
+      const totalTokens = runs.reduce((s, r) => s + (r.total_tokens || 0), 0)
       const totalRuns = runs.length
-      const errors = runs.filter((r: any) => r.error).length
+      const errors = runs.filter(r => r.error).length
       const avgTokens = totalRuns ? Math.round(totalTokens / totalRuns) : 0
+      const avgLatency = totalRuns
+        ? Math.round(runs.reduce((s, r) => s + latency(r), 0) / totalRuns * 10) / 10
+        : 0
 
-      // Daily token usage (last 7 days)
+      // Daily token usage
       const daily: Record<string, number> = {}
-      runs.forEach((r: any) => {
+      runs.forEach(r => {
         const day = r.start_time?.slice(0, 10)
         if (day) daily[day] = (daily[day] || 0) + (r.total_tokens || 0)
       })
@@ -68,16 +128,29 @@ export async function GET(req: Request) {
         .slice(-7)
         .map(([date, tokens]) => ({ date: date.slice(5), tokens }))
 
-      return NextResponse.json({ totalTokens, totalRuns, errors, avgTokens, chart })
+      // Model usage breakdown
+      const modelCounts: Record<string, number> = {}
+      runs.forEach(r => {
+        const m = extractModel(r)
+        if (m) modelCounts[m] = (modelCounts[m] || 0) + 1
+      })
+
+      return NextResponse.json({ totalTokens, totalRuns, errors, avgTokens, avgLatency, chart, modelCounts })
     }
 
-    if (type === 'active') {
+    if (type === 'trace') {
+      // Full trace tree for a single run: returns parent + all child spans
+      const traceId = searchParams.get('id')
+      if (!traceId) return NextResponse.json({ error: 'id required' }, { status: 400 })
       const data = await ls('/runs/query', {
         session_name: LS_PROJECT,
-        limit: 5,
-        filter: 'and(eq(status, "running"))',
+        trace_id: traceId,
+        limit: 100,
       })
-      return NextResponse.json({ runs: data?.runs || [] })
+      const spans = (data?.runs || []).map(mapRun)
+      // Sort by start_time so tree renders top-down
+      spans.sort((a: any, b: any) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())
+      return NextResponse.json({ spans, trace_id: traceId })
     }
 
     return NextResponse.json({ error: 'Unknown type' }, { status: 400 })

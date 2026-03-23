@@ -5,9 +5,11 @@ import UploadPanel from '@/components/UploadPanel'
 import PreviewPanel from '@/components/PreviewPanel'
 import ChatPanel from '@/components/ChatPanel'
 
+interface TraceSpan { id: string; name: string; run_type: string; status: string; latency_s: number; model: string; total_tokens: number; error?: string | null; parent_run_id?: string | null; inputs_preview?: string; outputs_preview?: string }
+
 // ─── types ────────────────────────────────────────────────────────────────────
-interface Run { id: string; name: string; run_type: string; status: string; start_time: string; total_tokens: number; prompt_tokens: number; completion_tokens: number; error?: string; parent_run_id?: string; inputs_preview?: string; outputs_preview?: string }
-interface Stats { totalTokens: number; totalRuns: number; errors: number; avgTokens: number; chart: { date: string; tokens: number }[] }
+interface Run { id: string; name: string; run_type: string; status: string; start_time: string; end_time?: string; latency_s: number; model: string; total_tokens: number; prompt_tokens: number; completion_tokens: number; error?: string | null; parent_run_id?: string | null; inputs_preview?: string; outputs_preview?: string }
+interface Stats { totalTokens: number; totalRuns: number; errors: number; avgTokens: number; avgLatency: number; chart: { date: string; tokens: number }[]; modelCounts: Record<string, number> }
 interface Price { symbol: string; price: number }
 interface WalletNet { network: string; balance: string; chain: string }
 interface Wallet { address: string; balances: WalletNet[]; tokenCount: number }
@@ -64,6 +66,9 @@ export default function CommandCenter() {
   const [loading, setLoading] = useState(true)
   const [time, setTime] = useState('')
   const [previewOpen, setPreviewOpen] = useState(false)
+  const [expandedTrace, setExpandedTrace] = useState<string | null>(null)
+  const [traceSpans, setTraceSpans] = useState<TraceSpan[]>([])
+  const [traceLoading, setTraceLoading] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -83,6 +88,18 @@ export default function CommandCenter() {
       setLoading(false)
     }
   }, [])
+
+  const loadTrace = useCallback(async (runId: string) => {
+    if (expandedTrace === runId) { setExpandedTrace(null); setTraceSpans([]); return }
+    setExpandedTrace(runId)
+    setTraceLoading(true)
+    try {
+      const res = await fetch(`/api/langsmith?type=trace&id=${runId}`)
+      const data = await res.json()
+      setTraceSpans(data.spans || [])
+    } catch { setTraceSpans([]) }
+    finally { setTraceLoading(false) }
+  }, [expandedTrace])
 
   useEffect(() => {
     load()
@@ -155,7 +172,19 @@ export default function CommandCenter() {
                 <StatBox label="total runs" value={stats.totalRuns} color="text-hud-blue" />
                 <StatBox label="avg / run" value={fmt(stats.avgTokens)} color="text-hud-text" />
                 <StatBox label="errors" value={stats.errors} color={stats.errors > 0 ? 'text-hud-red' : 'text-hud-green'} />
+                <StatBox label="avg latency" value={stats.avgLatency ? `${stats.avgLatency}s` : '—'} color="text-hud-amber" />
+                <StatBox label="models used" value={Object.keys(stats.modelCounts || {}).length || '—'} color="text-hud-text" />
               </div>
+              {stats.modelCounts && Object.keys(stats.modelCounts).length > 0 && (
+                <div className="mb-3 space-y-1">
+                  {Object.entries(stats.modelCounts).slice(0, 3).map(([model, count]) => (
+                    <div key={model} className="flex justify-between text-[9px]">
+                      <span className="text-hud-text/50 truncate max-w-[140px]">{model.split('/').pop()}</span>
+                      <span className="text-hud-blue">{count} runs</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               {stats.chart.length > 0 && (
                 <ResponsiveContainer width="100%" height={80}>
                   <AreaChart data={stats.chart}>
@@ -245,26 +274,62 @@ export default function CommandCenter() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
 
         {/* Live runs */}
-        <Panel title="AGENT ACTIVITY STREAM" tag={`${recentRuns.length} RUNS`} className="glow-cyan">
+        <Panel title="AGENT ACTIVITY STREAM" tag={`${recentRuns.length} TRACES`} className="glow-cyan">
           <div className="space-y-1.5 max-h-72 overflow-y-auto">
-            {recentRuns.length === 0 && <div className="text-hud-text/40 text-xs">No recent runs<ThinkingDots /></div>}
+            {recentRuns.length === 0 && <div className="text-hud-text/40 text-xs">{loading ? <><ThinkingDots /> Loading traces...</> : 'No traces — check LANGSMITH_API_KEY in Vercel env'}</div>}
             {recentRuns.map(run => (
-              <div key={run.id} className={`border border-hud-border/30 rounded p-2 text-[10px] ${run.status === 'running' ? 'border-hud-cyan/40 bg-hud-cyan/5' : ''}`}>
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
-                    <span style={{ color: STATUS_COLOR[run.status] || '#a8c4d4' }}>●</span>
-                    <span className="text-hud-text font-bold truncate max-w-[180px]">{run.name || run.run_type}</span>
-                    {run.status === 'running' && <ThinkingDots />}
+              <div key={run.id}>
+                <div
+                  className={`border border-hud-border/30 rounded p-2 text-[10px] cursor-pointer hover:border-hud-cyan/40 transition-colors ${run.status === 'running' ? 'border-hud-cyan/40 bg-hud-cyan/5' : ''} ${expandedTrace === run.id ? 'border-hud-cyan/60 bg-hud-cyan/5' : ''}`}
+                  onClick={() => loadTrace(run.id)}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span style={{ color: STATUS_COLOR[run.status] || '#a8c4d4' }}>●</span>
+                      <span className="text-hud-text font-bold truncate max-w-[140px]">{run.name || run.run_type}</span>
+                      {run.status === 'running' && <ThinkingDots />}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 text-hud-text/40">
+                      {run.model && <span className="text-hud-blue text-[8px] border border-hud-blue/30 px-1 rounded truncate max-w-[80px]">{run.model.split('/').pop()}</span>}
+                      {run.total_tokens > 0 && <span className="text-hud-cyan">{fmt(run.total_tokens)}t</span>}
+                      {run.latency_s > 0 && <span className="text-hud-text/40">{run.latency_s}s</span>}
+                      <span>{run.start_time ? ago(run.start_time) : ''}</span>
+                      <span className="text-hud-text/20">{expandedTrace === run.id ? '▲' : '▼'}</span>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-3 text-hud-text/40">
-                    {run.total_tokens > 0 && <span className="text-hud-cyan">{fmt(run.total_tokens)}t</span>}
-                    <span>{run.start_time ? ago(run.start_time) : ''}</span>
-                  </div>
+                  {run.error && <div className="text-hud-red text-[9px] truncate">⚠ {run.error.slice(0, 100)}</div>}
+                  {run.inputs_preview && !run.error && (
+                    <div className="text-hud-text/40 text-[8px] truncate mt-0.5">▶ {run.inputs_preview}</div>
+                  )}
                 </div>
-                {run.parent_run_id && <div className="text-hud-text/30 text-[8px] pl-4">↳ subagent</div>}
-                {run.error && <div className="text-hud-red text-[9px] truncate">⚠ {run.error.slice(0, 80)}</div>}
-                {run.outputs_preview && !run.error && (
-                  <div className="text-hud-text/30 text-[8px] truncate pl-4 mt-0.5">{run.outputs_preview}</div>
+                {/* Expanded trace tree */}
+                {expandedTrace === run.id && (
+                  <div className="ml-3 border-l border-hud-cyan/20 pl-2 mt-1 space-y-1">
+                    {traceLoading && <div className="text-hud-text/30 text-[9px]"><ThinkingDots /> loading spans...</div>}
+                    {!traceLoading && traceSpans.map(span => (
+                      <div key={span.id} className={`text-[9px] border border-hud-border/20 rounded px-2 py-1 ${span.parent_run_id ? 'ml-3' : ''}`}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5">
+                            <span style={{ color: STATUS_COLOR[span.status] || '#a8c4d4' }}>◆</span>
+                            <span className="text-hud-text/70 truncate max-w-[140px]">{span.name || span.run_type}</span>
+                            <span className="text-hud-text/30 text-[8px] border border-hud-border/20 px-1 rounded">{span.run_type}</span>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0 text-hud-text/30">
+                            {span.model && <span className="text-hud-blue/70">{span.model.split('/').pop()}</span>}
+                            {span.total_tokens > 0 && <span className="text-hud-cyan/60">{fmt(span.total_tokens)}t</span>}
+                            {span.latency_s > 0 && <span>{span.latency_s}s</span>}
+                          </div>
+                        </div>
+                        {span.error && <div className="text-hud-red/70 truncate mt-0.5">⚠ {span.error.slice(0, 80)}</div>}
+                        {span.outputs_preview && !span.error && (
+                          <div className="text-hud-text/25 truncate mt-0.5">↳ {span.outputs_preview}</div>
+                        )}
+                      </div>
+                    ))}
+                    {!traceLoading && traceSpans.length === 0 && (
+                      <div className="text-hud-text/30 text-[9px]">No spans found</div>
+                    )}
+                  </div>
                 )}
               </div>
             ))}
