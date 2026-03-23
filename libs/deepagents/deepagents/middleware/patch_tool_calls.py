@@ -1,5 +1,7 @@
 """Middleware to patch dangling tool calls in the messages history."""
 
+import json
+import logging
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
@@ -7,9 +9,78 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 from langgraph.types import Overwrite
 
+logger = logging.getLogger("deepagents.patch_tool_calls")
+
+# Maps tool_name → {arg_name: expected_type} for args the LLM commonly
+# serializes as JSON strings instead of native Python objects.
+_COERCE_ARGS: dict[str, dict[str, str]] = {
+    "write_todos": {"todos": "list"},
+    "web_search": {"session_params": "dict", "crawl_params": "dict"},
+}
+
+
+def _coerce_tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
+    """Coerce string-serialized args to their expected Python types.
+
+    Some LLMs (especially open-weight models) serialize list/dict arguments
+    as JSON strings, e.g. ``'[{"content": "..."}]'`` instead of an actual
+    list.  This causes Pydantic validation errors at tool execution time.
+
+    We fix them here, after the model call but before tool dispatch.
+    """
+    name = tool_call.get("name", "")
+    coerce_map = _COERCE_ARGS.get(name, {})
+    if not coerce_map:
+        return tool_call
+
+    args = dict(tool_call.get("args", {}))
+    changed = False
+    for arg_name, expected_type in coerce_map.items():
+        val = args.get(arg_name)
+        if not isinstance(val, str):
+            continue
+        try:
+            parsed = json.loads(val)
+        except Exception:
+            parsed = None
+
+        if expected_type == "list":
+            if isinstance(parsed, list):
+                args[arg_name] = parsed
+                changed = True
+            elif val.strip() in ("", "[]"):
+                args[arg_name] = []
+                changed = True
+        elif expected_type == "dict":
+            if isinstance(parsed, dict):
+                args[arg_name] = parsed
+                changed = True
+            elif val.strip() in ("", "{}"):
+                args[arg_name] = {}
+                changed = True
+            else:
+                # Drop the arg entirely so it defaults to None
+                args.pop(arg_name, None)
+                changed = True
+
+    if not changed:
+        return tool_call
+
+    logger.debug("Coerced args for %s: %s", name, {k: type(v).__name__ for k, v in args.items()})
+    return {**tool_call, "args": args}
+
 
 class PatchToolCallsMiddleware(AgentMiddleware):
-    """Middleware to patch dangling tool calls in the messages history."""
+    """Middleware to patch dangling tool calls and coerce malformed args.
+
+    Two responsibilities:
+    1. **Dangling tool calls** (``before_agent``): If a previous AIMessage has
+       tool calls that were never answered with a ToolMessage, insert a
+       cancellation ToolMessage so the message history stays consistent.
+    2. **Arg type coercion** (``after_model``): Some LLMs pass list/dict
+       arguments as JSON strings.  We parse them back to native Python types
+       before Pydantic validation runs at tool dispatch time.
+    """
 
     def before_agent(self, state: AgentState, runtime: Runtime[Any]) -> dict[str, Any] | None:  # noqa: ARG002
         """Before the agent runs, handle dangling tool calls from any AIMessage."""
@@ -42,3 +113,20 @@ class PatchToolCallsMiddleware(AgentMiddleware):
                         )
 
         return {"messages": Overwrite(patched_messages)}
+
+    def after_model(self, state: AgentState, runtime: Runtime[Any]) -> dict[str, Any] | None:  # noqa: ARG002
+        """After the LLM responds, coerce string-serialized tool call args."""
+        messages = state["messages"]
+        if not messages:
+            return None
+
+        last = messages[-1]
+        if not isinstance(last, AIMessage) or not last.tool_calls:
+            return None
+
+        coerced = [_coerce_tool_call_args(tc) for tc in last.tool_calls]
+        if coerced == last.tool_calls:
+            return None  # nothing changed
+
+        patched = last.model_copy(update={"tool_calls": coerced})
+        return {"messages": Overwrite([*messages[:-1], patched])}
