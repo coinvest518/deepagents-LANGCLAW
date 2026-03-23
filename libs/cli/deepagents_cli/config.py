@@ -440,7 +440,7 @@ COMMANDS = {
 MAX_ARG_LENGTH = 150
 
 # Agent configuration
-config: RunnableConfig = {"recursion_limit": 1000}
+config: RunnableConfig = {"recursion_limit": 50}
 
 # Rich console instance
 console = Console(highlight=False)

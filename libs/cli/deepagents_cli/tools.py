@@ -108,8 +108,6 @@ def web_search(  # noqa: ANN201 - Tavily-first web search adapter
     include_raw_content: bool = False,
     *,
     fallback_to_hyperbrowser: bool = True,
-    session_params: dict | None = None,
-    crawl_params: dict | None = None,
 ):
     """Simplified web search that uses the Tavily provider wrapper exclusively.
 
@@ -134,8 +132,6 @@ def web_search(  # noqa: ANN201 - Tavily-first web search adapter
             include_raw_content=include_raw_content,
             topic=topic,
             site_domain=site_domain,
-            session_params=session_params,
-            crawl_params=crawl_params,
         )
     except Exception as e:
         return {"error": f"Tavily web search failed: {e!s}", "query": query}
