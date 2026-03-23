@@ -26,6 +26,8 @@ RUN pip install --upgrade pip setuptools wheel --root-user-action=ignore \
 
 # Install LLM provider packages for the models we actually use.
 # Each is in a separate || echo so one failure never blocks the others.
+RUN pip install "langchain-ollama>=0.2.0" --root-user-action=ignore || \
+    echo "Ollama provider not available"
 RUN pip install "langchain-nvidia-ai-endpoints>=1.0.0" --root-user-action=ignore || \
     echo "NVIDIA provider not available"
 RUN pip install "langchain-mistralai>=0.2.0" --root-user-action=ignore || \
@@ -79,6 +81,11 @@ RUN pip install "aiohttp>=3.9.0" \
 # Social media publishing
 RUN pip install "upload-post>=2.0.0" \
     --root-user-action=ignore || echo "upload-post not available"
+
+# Voice: ElevenLabs TTS + faster-whisper STT
+# faster-whisper bundles ffmpeg via PyAV — handles .ogg natively, no system ffmpeg needed
+RUN pip install "elevenlabs>=1.0.0" "faster-whisper>=1.0.0" \
+    --root-user-action=ignore || echo "voice packages not available"
 
 # Persistent storage lives under ~/.deepagents (sessions, cron logs, workspace cache)
 # Render mounts a disk here when you add a persistent disk to the service.

@@ -130,18 +130,19 @@ def _pick_chat_model() -> str:
     """Return the fastest available model for casual chat (no tools needed).
 
     Priority:
-      1. Cerebras  — fastest inference available (600k TPM free, llama3.1-8b)
-      2. Ollama    — free self-hosted (if OLLAMA_BASE_URL is configured)
+      1. Ollama    — free self-hosted AWS endpoint (no API cost, fast)
+      2. Cerebras  — fastest cloud inference (600k TPM free, llama3.1-8b)
       3. Mistral Small — cheap fallback
       4. Same as MODEL — no dedicated fast path
 
     When result equals MODEL the fast path is skipped — no point making a
     separate call to the same model just to skip tools.
     """
+    if os.environ.get("OLLAMA_BASE_URL"):
+        model = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
+        return f"ollama:{model}"
     if os.environ.get("CEREBRAS_API_KEY"):
         return "cerebras:llama3.1-8b"
-    if os.environ.get("OLLAMA_BASE_URL"):
-        return "ollama:llama3.2:1b"
     if os.environ.get("MISTRAL_API_KEY"):
         return "mistralai:mistral-small-latest"
     return MODEL  # no cheaper option available → skip fast path
