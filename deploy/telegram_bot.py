@@ -311,30 +311,161 @@ async def _run_agent(agent: object, message: str, thread_id: str) -> str:
         return "Sorry, I encountered an error — please try again."
 
 
-async def _cerebras_chat(message: str, soul: str) -> str | None:
-    """Cerebras cloud fallback for Musa when Ollama is unreachable.
+# ---------------------------------------------------------------------------
+# Musa lightweight tool set (Cerebras tool loop — no LangGraph needed)
+# ---------------------------------------------------------------------------
 
-    Uses Cerebras's OpenAI-compatible API so langchain-openai suffices
-    (no separate langchain-cerebras package needed).
+_MUSA_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web for current information on any topic.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_time",
+            "description": "Get the current date and time.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Fetch text content from a URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+]
+
+
+async def _execute_musa_tool(name: str, args: dict) -> str:
+    """Execute one Musa tool and return a result string."""
+    try:
+        if name == "get_time":
+            import datetime
+            return datetime.datetime.now().strftime("%A, %B %d, %Y at %H:%M:%S")
+
+        if name == "web_search":
+            tavily_key = os.environ.get("TAVILY_API_KEY", "")
+            if not tavily_key:
+                return "Web search unavailable (no TAVILY_API_KEY)."
+            import json as _json
+            body = _json.dumps({
+                "api_key": tavily_key,
+                "query": args.get("query", ""),
+                "max_results": 3,
+            })
+            resp = await asyncio.to_thread(
+                requests.post,
+                "https://api.tavily.com/search",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                return f"Search failed (status {resp.status_code})."
+            results = resp.json().get("results", [])
+            if not results:
+                return "No results found."
+            return "\n\n".join(
+                f"{r.get('title','')}\n{r.get('url','')}\n{r.get('content','')[:300]}"
+                for r in results
+            )
+
+        if name == "fetch_url":
+            url = args.get("url", "")
+            if not url:
+                return "No URL provided."
+            resp = await asyncio.to_thread(
+                requests.get, url, timeout=8, headers={"User-Agent": "Mozilla/5.0"}
+            )
+            if resp.status_code != 200:
+                return f"Fetch failed (status {resp.status_code})."
+            # Strip HTML tags simply
+            import re as _re
+            text = _re.sub(r"<[^>]+>", " ", resp.text)
+            text = _re.sub(r"\s+", " ", text).strip()
+            return text[:1500]
+
+    except Exception as exc:
+        return f"Tool error: {exc}"
+
+    return "Unknown tool."
+
+
+async def _cerebras_chat(message: str, soul: str) -> str | None:
+    """Cerebras cloud fallback for Musa — with a lightweight tool loop.
+
+    Supports: web_search (Tavily), get_time, fetch_url.
+    Uses Cerebras's OpenAI-compatible API (no langchain-cerebras needed).
     Returns reply text, or None on failure.
     """
     key = os.environ.get("CEREBRAS_API_KEY", "")
     if not key:
         return None
     try:
+        import json as _json
         from langchain_openai import ChatOpenAI
-        from langchain_core.messages import HumanMessage
+        from langchain_core.messages import HumanMessage, ToolMessage
         from langchain_core.messages import SystemMessage as SM
+
         llm = ChatOpenAI(
             model="llama3.1-8b",
             api_key=key,
             base_url="https://api.cerebras.ai/v1",
         )
-        resp = await llm.ainvoke([SM(content=soul), HumanMessage(content=message)])
+        llm_with_tools = llm.bind_tools(_MUSA_TOOLS)
+
+        msgs: list = [SM(content=soul), HumanMessage(content=message)]
+
+        for _iteration in range(3):  # max 3 tool calls then final answer
+            resp = await llm_with_tools.ainvoke(msgs)
+            tool_calls = getattr(resp, "tool_calls", None) or []
+
+            if not tool_calls:
+                # No tool call — this is the final answer
+                text = str(resp.content).strip()
+                if text:
+                    logger.info("Cerebras reply (iter=%d): %.80s", _iteration, text)
+                return text or None
+
+            # Execute all tool calls in this turn
+            msgs.append(resp)
+            for tc in tool_calls:
+                tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                tc_id = tc.get("id", tc_name) if isinstance(tc, dict) else getattr(tc, "id", tc_name)
+                if isinstance(tc_args, str):
+                    try:
+                        tc_args = _json.loads(tc_args)
+                    except Exception:
+                        tc_args = {}
+                logger.info("Musa tool call: %s(%s)", tc_name, tc_args)
+                result = await _execute_musa_tool(tc_name, tc_args)
+                msgs.append(ToolMessage(content=result, tool_call_id=tc_id))
+
+        # Exhausted iterations — ask for final answer without tools
+        resp = await llm.ainvoke(msgs)
         text = str(resp.content).strip()
-        if text:
-            logger.info("Cerebras fallback reply: %.80s", text)
         return text or None
+
     except Exception as exc:
         logger.warning("Cerebras fallback failed: %s", exc)
         return None
