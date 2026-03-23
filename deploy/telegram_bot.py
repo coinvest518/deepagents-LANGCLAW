@@ -266,22 +266,111 @@ def _count_tokens_in_state(messages: list) -> int:
     return total
 
 
-async def _run_agent(agent: object, message: str, thread_id: str) -> str:
+# Map raw tool names to human-readable status labels shown in Telegram.
+_TOOL_LABELS: dict[str, str] = {
+    "web_search": "🔍 Searching web",
+    "tavily_search_results_json": "🔍 Searching web",
+    "tavily_search": "🔍 Searching web",
+    "read_file": "📄 Reading file",
+    "write_file": "✏️ Writing file",
+    "edit_file": "✏️ Editing file",
+    "glob_search": "🗂️ Scanning files",
+    "list_directory": "🗂️ Listing directory",
+    "run_command": "⚙️ Running command",
+    "run_python": "🐍 Running Python",
+    "ask_user": "❓ Waiting for your input",
+    "task": "🤖 Spawning subagent",
+    "create_task": "📋 Creating task",
+    "write_todos": "📋 Planning tasks",
+    "browser_navigate": "🌐 Opening page",
+    "browser_screenshot": "📸 Screenshot",
+    "fetch_url": "🌐 Fetching URL",
+    "http_request": "🌐 HTTP request",
+    "send_email": "📧 Sending email",
+    "github_api": "🐙 GitHub",
+    "execute": "⚙️ Executing",
+    "execute_python": "🐍 Running Python",
+    "composio": "🔗 Composio action",
+    "GOOGLESHEETS_BATCH_UPDATE": "📊 Updating Sheets",
+    "GOOGLESHEETS_BATCH_GET": "📊 Reading Sheets",
+    "GMAIL_SEND_EMAIL": "📧 Sending email",
+    "GMAIL_FETCH_EMAILS": "📧 Reading email",
+    "GITHUB_CREATE_AN_ISSUE": "🐙 GitHub issue",
+}
+
+
+def _status_from_chunk(chunk: object) -> str:
+    """Extract a short human-readable status from an astream chunk dict."""
+    if not isinstance(chunk, dict):
+        return ""
+    # model node — LLM decided to call tools
+    if "model" in chunk:
+        msgs = chunk["model"].get("messages", []) if isinstance(chunk["model"], dict) else []
+        for msg in msgs:
+            tcs = (
+                getattr(msg, "tool_calls", None)
+                or (msg.get("tool_calls") if isinstance(msg, dict) else None)
+                or []
+            )
+            if tcs:
+                labels = [
+                    _TOOL_LABELS.get(
+                        (tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")),
+                        "🔧 " + (tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")),
+                    )
+                    for tc in tcs
+                ]
+                return ", ".join(labels) + "…"
+        return "🤔 Thinking…"
+    # tools node — tool results coming back
+    if "tools" in chunk:
+        msgs = chunk["tools"].get("messages", []) if isinstance(chunk["tools"], dict) else []
+        names = []
+        for msg in msgs:
+            n = getattr(msg, "name", None) or (msg.get("name") if isinstance(msg, dict) else None)
+            if n:
+                names.append(_TOOL_LABELS.get(n, f"🔧 {n}"))
+        if names:
+            return ", ".join(names) + " ✓"
+    return ""
+
+
+async def _run_agent(
+    agent: object,
+    message: str,
+    thread_id: str,
+    progress_cb: object = None,
+) -> str:
     """Run the agent for *message* and return the complete text response.
 
     Drains astream with default params (no subgraphs=True) so the agent
     runs to completion including all tool calls, then reads the final state.
     Using subgraphs=True caused ClosedResourceError on the server when tools
     ran inside subgraphs — removed it to fix that.
+
+    progress_cb: optional async callable(status: str) — called with a short
+    status string each time a meaningful step is detected.  Rate-limited
+    internally to at most one call per 1.5 seconds.
     """
     config: dict = {"configurable": {"thread_id": thread_id}}
     try:
+        _last_progress = 0.0
         # Drain the stream — runs agent + tools to completion.
-        async for _ in agent.astream(  # type: ignore[union-attr]
+        async for chunk in agent.astream(  # type: ignore[union-attr]
             {"messages": [{"role": "user", "content": message}]},
             config=config,
         ):
-            pass
+            if progress_cb is not None:
+                import time as _time
+                now = _time.monotonic()
+                if now - _last_progress >= 1.5:
+                    status = _status_from_chunk(chunk)
+                    if status:
+                        _last_progress = now
+                        try:
+                            await progress_cb(status)  # type: ignore[misc]
+                        except Exception:
+                            pass
 
         # Read the final state for the response text.
         state = await agent.aget_state(config)  # type: ignore[union-attr]
@@ -497,7 +586,7 @@ async def _quick_chat(message: str) -> tuple[str, bool]:
                 f"{ollama_url}/api/chat",
                 data=body,
                 headers={"Content-Type": "application/json"},
-                timeout=8,  # fail fast — Cerebras cloud fallback is <1s
+                timeout=int(os.environ.get("OLLAMA_TIMEOUT", "20")),
             )
             if resp.status_code == 200:
                 text = resp.json().get("message", {}).get("content", "").strip()
@@ -593,19 +682,44 @@ class HeadlessApp:
             # Show typing + placeholder immediately.
             await self._tg._start_thinking(telegram_chat_id)
 
+            # Build a live-progress callback that edits the placeholder message.
+            # Rate-limited to ≥1.5 s between edits; skips if text unchanged.
+            _last_status: list[str] = [""]
+
+            async def _progress(status: str) -> None:
+                if status == _last_status[0]:
+                    return
+                _last_status[0] = status
+                mid = self._tg._pending_placeholders.get(telegram_chat_id)
+                if not mid:
+                    return
+                try:
+                    await asyncio.to_thread(
+                        self._tg.edit_message,
+                        telegram_chat_id,
+                        mid,
+                        f"⏳ <i>{status}</i>",
+                    )
+                except Exception:
+                    pass
+
             # Musa routing: ask Musa first unless message clearly needs full agent.
-            # Musa reads the soul file and decides: answer / HANDOFF / ASK.
             if not _needs_full_agent(message) and CHAT_MODEL != MODEL:
                 logger.info("Musa routing (model=%s): %.60s", CHAT_MODEL, message)
+                await _progress("💬 Musa (quick-chat)…")
                 musa_reply, handoff = await _quick_chat(message)
                 if not handoff:
                     logger.info("Musa reply to chat_id=%d: %.80s", telegram_chat_id, musa_reply)
                     self._tg.deliver_reply(telegram_chat_id, musa_reply)
                     return
+                # Musa couldn't handle it — escalate visibly
                 logger.info("Musa HANDOFF → full agent for chat_id=%d", telegram_chat_id)
+                await _progress("🔄 Escalating to full agent…")
+            else:
+                await _progress("🤖 Full agent starting…")
 
             # Full agent path: tasks, tool calls, anything non-trivial.
-            response = await _run_agent(self._agent, message, thread_id)
+            response = await _run_agent(self._agent, message, thread_id, progress_cb=_progress)
 
         # Deliver outside the lock so the next message can start processing
         # while we're waiting for Telegram's API to accept the reply.
