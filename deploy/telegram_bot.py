@@ -311,6 +311,29 @@ async def _run_agent(agent: object, message: str, thread_id: str) -> str:
         return "Sorry, I encountered an error — please try again."
 
 
+async def _cerebras_chat(message: str, soul: str) -> str | None:
+    """Cerebras cloud fallback for Musa when Ollama is unreachable.
+
+    Returns reply text, or None on failure.
+    """
+    key = os.environ.get("CEREBRAS_API_KEY", "")
+    if not key:
+        return None
+    try:
+        from langchain.chat_models import init_chat_model
+        from langchain_core.messages import HumanMessage
+        from langchain_core.messages import SystemMessage as SM
+        llm = init_chat_model("llama3.1-8b", model_provider="cerebras")
+        resp = await llm.ainvoke([SM(content=soul), HumanMessage(content=message)])
+        text = str(resp.content).strip()
+        if text:
+            logger.info("Cerebras fallback reply: %.80s", text)
+        return text or None
+    except Exception as exc:
+        logger.warning("Cerebras fallback failed: %s", exc)
+        return None
+
+
 async def _quick_chat(message: str) -> tuple[str, bool]:
     """Ask Musa (Ollama) with soul context. Returns (reply, handoff).
 
@@ -337,13 +360,15 @@ async def _quick_chat(message: str) -> tuple[str, bool]:
                 f"{ollama_url}/api/chat",
                 data=body,
                 headers={"Content-Type": "application/json"},
-                timeout=45,
+                timeout=8,  # fail fast — Cerebras cloud fallback is <1s
             )
             if resp.status_code == 200:
                 text = resp.json().get("message", {}).get("content", "").strip()
             else:
-                logger.warning("Ollama returned %d — handing off", resp.status_code)
-                return ("", True)
+                logger.warning("Ollama returned %d — trying Cerebras fallback", resp.status_code)
+                text = await _cerebras_chat(message, soul)
+                if text is None:
+                    return ("", True)
         else:
             # Non-Ollama fallback (Cerebras, Mistral, etc.)
             from langchain.chat_models import init_chat_model
@@ -361,7 +386,13 @@ async def _quick_chat(message: str) -> tuple[str, bool]:
         return (text, False) if text else ("", True)
 
     except Exception:
-        logger.warning("Musa quick-chat failed — handing off to full agent", exc_info=True)
+        logger.warning("Musa quick-chat (Ollama) failed — trying Cerebras fallback")
+        try:
+            text = await _cerebras_chat(message, soul)
+            if text:
+                return (text, False)
+        except Exception:
+            pass
         return ("", True)
 
 
