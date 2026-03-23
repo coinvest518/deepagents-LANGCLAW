@@ -4,12 +4,9 @@ astra_store.py — AstraDB-backed persistence for task records and conversation 
 Replaces the in-memory _TaskStore so data survives Render restarts.
 All writes are async and fire-and-forget — no latency added to responses.
 
-Collections created automatically on first use:
+Collections:
   agent_tasks           — task lifecycle records (running/done/incomplete)
   conversation_history  — raw message log per thread_id
-
-Falls back silently to the in-memory _TaskStore if ASTRA_DB_API_KEY /
-ASTRA_DB_ENDPOINT are not set.
 """
 
 from __future__ import annotations
@@ -25,25 +22,48 @@ logger = logging.getLogger("deepagents.astra_store")
 
 _KEYSPACE = os.environ.get("ASTRA_DB_KEYSPACE", "default_keyspace")
 
+# Module-level cache — collection objects are created once and reused.
+# This prevents calling createCollection on every read/write which was
+# hammering AstraDB's 100-index limit and adding 2-3s of latency per call.
+_db_cache: object = None
+_collection_cache: dict = {}
+
 
 def _get_db():
-    """Return an astrapy Database instance or raise if not configured."""
+    global _db_cache
+    if _db_cache is not None:
+        return _db_cache
     api_key  = os.environ.get("ASTRA_DB_API_KEY")
     endpoint = os.environ.get("ASTRA_DB_ENDPOINT")
     if not api_key or not endpoint:
         raise RuntimeError("ASTRA_DB_API_KEY / ASTRA_DB_ENDPOINT not set")
     from astrapy import DataAPIClient
-    client = DataAPIClient(token=api_key)
-    return client.get_database(endpoint, keyspace=_KEYSPACE)
+    _db_cache = DataAPIClient(token=api_key).get_database(endpoint, keyspace=_KEYSPACE)
+    return _db_cache
 
 
 def _get_collection(name: str):
-    """Return (or create) a collection, raising on any error."""
+    """Return a cached collection handle, creating it on first access only."""
+    if name in _collection_cache:
+        return _collection_cache[name]
     db = _get_db()
     try:
-        return db.create_collection(name)
-    except Exception:
-        return db.get_collection(name)
+        # create_collection is idempotent when collection already exists — but
+        # on AstraDB free tier hitting the 100-index cap makes it raise every time.
+        # Fall back to get_collection (no-index-creation) when that happens.
+        col = db.create_collection(name)
+    except Exception as exc:
+        if "100 indexes" in str(exc) or "INVALID_DATABASE_QUERY" in str(exc):
+            logger.warning(
+                "AstraDB 100-index limit hit for '%s' — switching to get_collection "
+                "(collection already exists, this is fine)", name
+            )
+        else:
+            logger.warning("create_collection('%s') failed (%s), using get_collection", name, exc)
+        col = db.get_collection(name)
+    _collection_cache[name] = col
+    logger.info("AstraDB: collection '%s' ready", name)
+    return col
 
 
 # ---------------------------------------------------------------------------
@@ -51,12 +71,10 @@ def _get_collection(name: str):
 # ---------------------------------------------------------------------------
 
 class AstraTaskStore:
-    """Persists every agent task to AstraDB collection `agent_tasks`.
+    """Persists every agent task to AstraDB `agent_tasks`.
 
-    Writes are always synchronous-in-a-thread so the async event loop
-    never blocks waiting for AstraDB network I/O.  A small in-memory
-    deque mirrors the last 200 entries for fast reads (the /tasks
-    endpoint returns from RAM; AstraDB is the durable backup).
+    In-memory deque mirrors the last 200 entries for instant reads.
+    AstraDB writes are fire-and-forget (run_in_executor).
     """
 
     COLLECTION = "agent_tasks"
@@ -64,29 +82,28 @@ class AstraTaskStore:
 
     def __init__(self) -> None:
         self._mirror: deque[dict] = deque(maxlen=self._MIRROR_MAX)
-        self._ready = False   # becomes True on first successful write
 
     # ── internal ──────────────────────────────────────────────────────────
 
     def _write(self, op: str, doc: dict | None = None, filter_: dict | None = None,
                update: dict | None = None) -> None:
-        """Execute one Astra write synchronously (called from a thread pool)."""
         try:
             col = _get_collection(self.COLLECTION)
-            if op == "insert":
+            if op == "insert" and doc:
                 col.insert_one(doc)
-            elif op == "update":
+            elif op == "update" and filter_ and update:
                 col.update_one(filter_, update)
-            self._ready = True
         except Exception as exc:
             logger.warning("AstraDB task write failed (%s): %s", op, exc)
 
     def _async_write(self, *args, **kwargs) -> None:
-        """Schedule _write on the default thread-pool executor (fire-and-forget)."""
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, self._write, *args, **kwargs)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, self._write, *args, **kwargs)
+        except RuntimeError:
+            pass  # no running event loop — skip fire-and-forget write
 
-    # ── public API (mirrors _TaskStore interface) ─────────────────────────
+    # ── public API ─────────────────────────────────────────────────────────
 
     def start(self, task_id: str, thread_id: str, message: str,
               source: str = "dashboard") -> None:
@@ -101,12 +118,12 @@ class AstraTaskStore:
             "ts_start":  time.time(),
             "ts_end":    None,
         }
-        self._mirror.append(doc.copy())
+        self._mirror.append({**doc, "id": task_id})
         self._async_write("insert", doc=doc)
 
     def done(self, task_id: str, response: str) -> None:
         for t in self._mirror:
-            if t["id"] if "id" in t else t.get("_id") == task_id:
+            if (t.get("_id") or t.get("id")) == task_id:
                 t["status"]   = "done"
                 t["response"] = response[:600]
                 t["ts_end"]   = time.time()
@@ -120,8 +137,7 @@ class AstraTaskStore:
 
     def fail(self, task_id: str, error: str) -> None:
         for t in self._mirror:
-            tid = t.get("_id") or t.get("id", "")
-            if tid == task_id:
+            if (t.get("_id") or t.get("id")) == task_id:
                 t["status"] = "incomplete"
                 t["error"]  = str(error)[:300]
                 t["ts_end"] = time.time()
@@ -134,25 +150,24 @@ class AstraTaskStore:
         )
 
     def recent(self, n: int = 50) -> list[dict]:
-        """Fast read from in-memory mirror — no Astra round-trip."""
-        items = list(reversed(list(self._mirror)))[:n]
-        # normalise _id → id for JSON responses
         return [
             {**t, "id": t.get("_id") or t.get("id", "")}
-            for t in items
+            for t in list(reversed(list(self._mirror)))[:n]
         ]
 
     def incomplete(self) -> list[dict]:
         return [t for t in self._mirror if t.get("status") == "incomplete"]
 
     def load_from_astra(self, limit: int = 200) -> None:
-        """Called at startup to pre-populate the mirror from AstraDB."""
+        """Lazy-load from AstraDB into mirror (called on first /tasks request)."""
         try:
             col = _get_collection(self.COLLECTION)
             cursor = col.find({}, sort={"ts_start": -1}, limit=limit)
+            loaded = 0
             for doc in cursor:
-                self._mirror.appendleft(doc)
-            logger.info("AstraTaskStore: loaded %d tasks from AstraDB", len(self._mirror))
+                self._mirror.appendleft({**doc, "id": doc.get("_id", "")})
+                loaded += 1
+            logger.info("AstraTaskStore: loaded %d tasks from AstraDB", loaded)
         except Exception as exc:
             logger.info("AstraTaskStore: could not load from AstraDB (%s) — starting fresh", exc)
 
@@ -162,11 +177,10 @@ class AstraTaskStore:
 # ---------------------------------------------------------------------------
 
 class AstraConversationStore:
-    """Persists raw message logs to AstraDB collection `conversation_history`.
+    """Persists raw message logs to AstraDB `conversation_history`.
 
     Writes are fire-and-forget.  Reads are direct Astra queries.
-    Used as fallback when the LangGraph SQLite checkpointer is empty
-    (e.g. after a Render restart).
+    Used as fallback when LangGraph SQLite checkpointer is empty after restart.
     """
 
     COLLECTION = "conversation_history"
@@ -190,12 +204,15 @@ class AstraConversationStore:
         doc = {
             "_id":       str(uuid.uuid4()),
             "thread_id": thread_id,
-            "role":      role,          # "user" or "agent"
+            "role":      role,
             "text":      text[:1500],
             "ts":        time.time(),
         }
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, self._write, doc)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, self._write, doc)
+        except RuntimeError:
+            pass  # no running event loop — skip
 
     def get_history(self, thread_id: str, limit: int = 100) -> list[dict]:
         """Return messages for *thread_id* ordered oldest-first."""
@@ -218,7 +235,7 @@ class AstraConversationStore:
 
 
 # ---------------------------------------------------------------------------
-# Singletons — import these in telegram_bot.py
+# Singletons
 # ---------------------------------------------------------------------------
 
 task_store         = AstraTaskStore()

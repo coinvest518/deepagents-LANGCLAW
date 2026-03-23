@@ -91,21 +91,20 @@ export async function GET(req: Request) {
 
   try {
     if (type === 'runs') {
-      // Root-level traces only (is_root filters out every internal tool/subagent step)
+      // is_root must be a filter string in the REST API, not a top-level field
       const data = await ls('/runs/query', {
         session_name: LS_PROJECT,
-        is_root: true,
+        filter: 'eq(is_root, true)',
         limit: 25,
       })
       const runs = (data?.runs || []).map(mapRun)
-      return NextResponse.json({ runs })
+      return NextResponse.json({ runs, _raw_count: data?.runs?.length ?? 0 })
     }
 
     if (type === 'stats') {
-      // Pull root runs for stats (avoids counting sub-steps multiple times)
       const data = await ls('/runs/query', {
         session_name: LS_PROJECT,
-        is_root: true,
+        filter: 'eq(is_root, true)',
         limit: 100,
       })
       const runs: any[] = data?.runs || []
@@ -144,7 +143,7 @@ export async function GET(req: Request) {
       if (!traceId) return NextResponse.json({ error: 'id required' }, { status: 400 })
       const data = await ls('/runs/query', {
         session_name: LS_PROJECT,
-        trace_id: traceId,
+        filter: `eq(trace_id, "${traceId}")`,
         limit: 100,
       })
       const spans = (data?.runs || []).map(mapRun)
