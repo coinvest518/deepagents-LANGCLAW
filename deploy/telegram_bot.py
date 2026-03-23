@@ -715,6 +715,12 @@ async def start_api_server(agent: object) -> None:
         if not _check_secret(request):
             return web.json_response({"error": "Unauthorized"}, status=401)
         limit = int(request.rel_url.query.get("limit", "50"))
+        # Lazy-load from AstraDB on first request after a restart (zero startup cost)
+        try:
+            if not task_store.recent(1):
+                task_store.load_from_astra()
+        except Exception:
+            pass
         return web.json_response({
             "tasks":      task_store.recent(limit),
             "incomplete": len(task_store.incomplete()),
@@ -813,12 +819,6 @@ async def main() -> None:
         logger.info("  model_router = %d providers configured", len(status))
         for name, info in status.items():
             logger.info("    %-25s %s", name, info["spec"])
-    except Exception:
-        pass
-
-    # Pre-populate in-memory task mirror from AstraDB (no-op if not configured)
-    try:
-        task_store.load_from_astra()
     except Exception:
         pass
 
