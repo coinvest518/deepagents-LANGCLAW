@@ -314,16 +314,22 @@ async def _run_agent(agent: object, message: str, thread_id: str) -> str:
 async def _cerebras_chat(message: str, soul: str) -> str | None:
     """Cerebras cloud fallback for Musa when Ollama is unreachable.
 
+    Uses Cerebras's OpenAI-compatible API so langchain-openai suffices
+    (no separate langchain-cerebras package needed).
     Returns reply text, or None on failure.
     """
     key = os.environ.get("CEREBRAS_API_KEY", "")
     if not key:
         return None
     try:
-        from langchain.chat_models import init_chat_model
+        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
         from langchain_core.messages import SystemMessage as SM
-        llm = init_chat_model("llama3.1-8b", model_provider="cerebras")
+        llm = ChatOpenAI(
+            model="llama3.1-8b",
+            api_key=key,
+            base_url="https://api.cerebras.ai/v1",
+        )
         resp = await llm.ainvoke([SM(content=soul), HumanMessage(content=message)])
         text = str(resp.content).strip()
         if text:
