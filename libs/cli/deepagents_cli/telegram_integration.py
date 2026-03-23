@@ -421,10 +421,11 @@ class TelegramIntegration:
                     chat_id, placeholder_id, chunk, parse_mode="HTML"
                 )
                 if not ok:
-                    # Fallback: send new message if edit failed.
+                    logger.warning("edit_message failed for chat_id=%d, sending new message", chat_id)
                     self.send_message_html(chat_id, chunk)
             else:
                 self.send_message_html(chat_id, chunk)
+        logger.info("Reply delivered to chat_id=%d (%d chunk(s))", chat_id, len(chunks))
 
     def download_telegram_file(self, file_id: str, dest_dir: Path) -> Path | None:  # noqa: PLR6301
         """Download a Telegram file to *dest_dir* and return the local path.

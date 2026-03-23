@@ -176,9 +176,11 @@ def _is_casual(text: str) -> bool:
     lower = stripped.lower()
     if any(w in lower.split() for w in _TASK_WORDS):
         return False
-    # Short messages: greeting pattern OR under 15 chars with no question mark
-    if len(stripped) <= 15:
-        return bool(_CASUAL_RE.match(stripped)) or "?" not in stripped
+    # Short messages (≤20 chars) with no task words are always casual —
+    # task words are already filtered above, so a short question like
+    # "You back Ai?" or "You there?" is not a task.
+    if len(stripped) <= 20:
+        return True
     return bool(_CASUAL_RE.match(stripped))
 
 
@@ -433,6 +435,7 @@ class HeadlessApp:
                 logger.info("Fast path (casual chat, model=%s)", CHAT_MODEL)
                 response = await _quick_chat(message)
                 if response:
+                    logger.info("Quick-chat reply to chat_id=%d: %.80s", telegram_chat_id, response)
                     self._tg.deliver_reply(telegram_chat_id, response)
                     return
 
@@ -441,6 +444,7 @@ class HeadlessApp:
 
         # Deliver outside the lock so the next message can start processing
         # while we're waiting for Telegram's API to accept the reply.
+        logger.info("Agent reply to chat_id=%d: %.80s", telegram_chat_id, response)
         self._tg.deliver_reply(telegram_chat_id, response)
 
 
