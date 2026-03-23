@@ -87,6 +87,10 @@ RUN pip install "upload-post>=2.0.0" \
 RUN pip install "elevenlabs>=1.0.0" "faster-whisper>=1.0.0" \
     --root-user-action=ignore || echo "voice packages not available"
 
+# Ollama support - already included in langchain-ollama above, but ensure it's available
+RUN pip install "ollama>=0.6.0" \
+    --root-user-action=ignore || echo "ollama package not available"
+
 # Persistent storage lives under ~/.deepagents (sessions, cron logs, workspace cache)
 # Render mounts a disk here when you add a persistent disk to the service.
 ENV DEEPAGENTS_HOME=/root/.deepagents
