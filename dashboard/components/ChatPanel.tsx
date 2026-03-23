@@ -3,13 +3,38 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 
 interface Message { role: 'user' | 'agent'; text: string; ts: number }
 
+/** RFC-4122 v4 UUID without any external dependency */
+function newUUID(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
+  })
+}
+
+const STORAGE_KEY = 'da_dashboard_thread_id'
+
+function getOrCreateThreadId(): string {
+  if (typeof window === 'undefined') return newUUID()
+  const stored = localStorage.getItem(STORAGE_KEY)
+  if (stored) return stored
+  const id = newUUID()
+  localStorage.setItem(STORAGE_KEY, id)
+  return id
+}
+
 export default function ChatPanel() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState<'unknown' | 'ok' | 'offline'>('unknown')
-  const threadId = useRef(`dashboard-${Date.now()}`)
+  const [historyLoaded, setHistoryLoaded] = useState(false)
+  const threadId = useRef<string>('')
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  // Initialise thread_id from localStorage (stable across refreshes)
+  useEffect(() => {
+    threadId.current = getOrCreateThreadId()
+  }, [])
 
   // Check agent health
   useEffect(() => {
@@ -18,6 +43,26 @@ export default function ChatPanel() {
       .then(d => setStatus(d.status === 'ok' || d.model ? 'ok' : 'offline'))
       .catch(() => setStatus('offline'))
   }, [])
+
+  // Load conversation history for this thread on mount
+  useEffect(() => {
+    if (historyLoaded) return
+    const tid = threadId.current
+    if (!tid) return
+    fetch(`/api/agent-history?thread_id=${encodeURIComponent(tid)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.messages?.length) {
+          setMessages(data.messages.map((m: { role: string; text: string }) => ({
+            role: m.role as 'user' | 'agent',
+            text: m.text,
+            ts: Date.now(),
+          })))
+        }
+        setHistoryLoaded(true)
+      })
+      .catch(() => setHistoryLoaded(true))
+  }, [historyLoaded])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -41,12 +86,28 @@ export default function ChatPanel() {
         text: data.response || data.error || 'No response',
         ts: Date.now(),
       }])
+      // If task was marked incomplete, show a hint
+      if (data.status === 'incomplete') {
+        setMessages(prev => [...prev, {
+          role: 'agent',
+          text: '⚠ Task incomplete — rate limit or error. Send again to retry.',
+          ts: Date.now(),
+        }])
+      }
     } catch (e: any) {
       setMessages(prev => [...prev, { role: 'agent', text: `Error: ${e.message}`, ts: Date.now() }])
     } finally {
       setLoading(false)
     }
   }, [input, loading])
+
+  const resetThread = useCallback(() => {
+    const id = newUUID()
+    localStorage.setItem(STORAGE_KEY, id)
+    threadId.current = id
+    setMessages([])
+    setHistoryLoaded(false)
+  }, [])
 
   const statusColor = status === 'ok' ? '#00ff88' : status === 'offline' ? '#ff2d55' : '#ff6b00'
   const statusLabel = status === 'ok' ? 'ONLINE' : status === 'offline' ? 'OFFLINE' : 'CHECKING'
@@ -57,9 +118,11 @@ export default function ChatPanel() {
       <div className="flex items-center gap-2 mb-3 text-[9px] tracking-widest">
         <span className="inline-block w-2 h-2 rounded-full" style={{ background: statusColor, boxShadow: `0 0 6px ${statusColor}` }} />
         <span style={{ color: statusColor }}>{statusLabel}</span>
-        <span className="text-hud-text/30 ml-auto">THREAD: {threadId.current.slice(-8)}</span>
+        <span className="text-hud-text/30 ml-auto">
+          THREAD: {threadId.current ? threadId.current.slice(-8) : '...'}
+        </span>
         <button
-          onClick={() => { threadId.current = `dashboard-${Date.now()}`; setMessages([]) }}
+          onClick={resetThread}
           className="text-hud-text/30 hover:text-hud-amber ml-1"
           title="New conversation"
         >

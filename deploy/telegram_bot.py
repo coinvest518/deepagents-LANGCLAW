@@ -43,6 +43,9 @@ import logging
 import os
 import re
 import sys
+import time
+import uuid
+from collections import deque
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -557,6 +560,79 @@ class HeadlessBot:
 # HTTP API server (dashboard ↔ agent bridge)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# UUID helper — LangGraph requires valid UUIDs as thread IDs
+# ---------------------------------------------------------------------------
+
+def _to_uuid(thread_id: str) -> str:
+    """Convert any string to a valid UUID.
+
+    If *thread_id* is already a valid UUID it is returned unchanged.
+    Otherwise a deterministic UUID-v5 is derived from the string so the
+    same dashboard session always maps to the same LangGraph thread.
+    """
+    try:
+        uuid.UUID(thread_id)
+        return thread_id
+    except (ValueError, AttributeError):
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, thread_id))
+
+
+# ---------------------------------------------------------------------------
+# Task store — tracks every agent task (running / done / failed / incomplete)
+# ---------------------------------------------------------------------------
+
+_MAX_TASKS = 200
+
+class _TaskStore:
+    """In-memory ring buffer of recent agent tasks with status tracking."""
+
+    def __init__(self, maxlen: int = _MAX_TASKS) -> None:
+        self._tasks: deque[dict] = deque(maxlen=maxlen)
+
+    def start(self, task_id: str, thread_id: str, message: str, source: str = "dashboard") -> None:
+        self._tasks.append({
+            "id":        task_id,
+            "thread_id": thread_id,
+            "message":   message[:300],
+            "source":    source,
+            "status":    "running",
+            "response":  "",
+            "error":     "",
+            "ts_start":  time.time(),
+            "ts_end":    None,
+        })
+
+    def _find(self, task_id: str) -> dict | None:
+        for t in self._tasks:
+            if t["id"] == task_id:
+                return t
+        return None
+
+    def done(self, task_id: str, response: str) -> None:
+        t = self._find(task_id)
+        if t:
+            t["status"]   = "done"
+            t["response"] = response[:600]
+            t["ts_end"]   = time.time()
+
+    def fail(self, task_id: str, error: str) -> None:
+        t = self._find(task_id)
+        if t:
+            t["status"] = "incomplete"   # incomplete = failed, can be retried
+            t["error"]  = str(error)[:300]
+            t["ts_end"] = time.time()
+
+    def recent(self, n: int = 50) -> list[dict]:
+        return list(reversed(list(self._tasks)))[:n]
+
+    def incomplete(self) -> list[dict]:
+        return [t for t in self._tasks if t["status"] == "incomplete"]
+
+
+task_store = _TaskStore()
+
+
 def _check_secret(request: object) -> bool:
     """Return True if the request carries the correct DASHBOARD_SECRET header."""
     if not DASHBOARD_SECRET:
@@ -590,7 +666,9 @@ async def start_api_server(agent: object) -> None:
             return web.json_response({"error": "Invalid JSON"}, status=400)
 
         message: str = (data.get("message") or "").strip()
-        thread_id: str = (data.get("thread_id") or "dashboard-default").strip()
+        raw_thread: str = (data.get("thread_id") or "dashboard-default").strip()
+        # LangGraph requires valid UUIDs — convert deterministically
+        thread_id = _to_uuid(raw_thread)
 
         if not message:
             return web.json_response({"error": "message is required"}, status=400)
@@ -598,21 +676,90 @@ async def start_api_server(agent: object) -> None:
         if thread_id not in _api_locks:
             _api_locks[thread_id] = asyncio.Lock()
 
+        task_id = str(uuid.uuid4())
+        task_store.start(task_id, thread_id, message, source="dashboard")
+
         async with _api_locks[thread_id]:
             try:
                 if _is_casual(message) and CHAT_MODEL != MODEL:
                     response = await _quick_chat(message)
                     if response:
-                        return web.json_response({"response": response, "fast_path": True})
+                        task_store.done(task_id, response)
+                        return web.json_response({
+                            "response":  response,
+                            "thread_id": thread_id,
+                            "task_id":   task_id,
+                            "fast_path": True,
+                        })
                 response = await _run_agent(agent, message, thread_id)
-                return web.json_response({"response": response, "thread_id": thread_id})
+                task_store.done(task_id, response)
+                return web.json_response({
+                    "response":  response,
+                    "thread_id": thread_id,
+                    "task_id":   task_id,
+                })
             except Exception as exc:
                 logger.exception("HTTP /chat error")
-                return web.json_response({"error": str(exc)}, status=500)
+                task_store.fail(task_id, str(exc))
+                return web.json_response({
+                    "error":     str(exc),
+                    "thread_id": thread_id,
+                    "task_id":   task_id,
+                    "status":    "incomplete",
+                }, status=500)
+
+    async def tasks_handler(request: web.Request) -> web.Response:
+        """Return recent task history with status (done / running / incomplete)."""
+        if not _check_secret(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        limit = int(request.rel_url.query.get("limit", "50"))
+        return web.json_response({
+            "tasks":      task_store.recent(limit),
+            "incomplete": len(task_store.incomplete()),
+        })
+
+    async def history_handler(request: web.Request) -> web.Response:
+        """Return conversation history for a thread (for dashboard replay)."""
+        if not _check_secret(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        raw_thread = request.match_info.get("thread_id", "")
+        thread_id = _to_uuid(raw_thread) if raw_thread else ""
+        if not thread_id:
+            return web.json_response({"error": "thread_id required"}, status=400)
+        try:
+            state = await agent.aget_state({"configurable": {"thread_id": thread_id}})  # type: ignore
+            if state is None:
+                return web.json_response({"messages": [], "thread_id": thread_id})
+            raw_msgs = getattr(state, "values", {}).get("messages", []) or []
+            messages = []
+            for msg in raw_msgs:
+                if isinstance(msg, dict):
+                    role    = msg.get("type") or msg.get("role", "")
+                    content = msg.get("content", "")
+                    tools   = msg.get("tool_calls")
+                else:
+                    role    = getattr(msg, "type", "")
+                    content = getattr(msg, "content", "")
+                    tools   = getattr(msg, "tool_calls", None)
+                if isinstance(content, list):
+                    content = " ".join(
+                        b.get("text", "") if isinstance(b, dict) else str(b)
+                        for b in content
+                    )
+                if role in ("human", "HumanMessage"):
+                    messages.append({"role": "user",  "text": str(content)})
+                elif role in ("ai", "AIMessage") and not tools:
+                    messages.append({"role": "agent", "text": str(content)})
+            return web.json_response({"messages": messages, "thread_id": thread_id})
+        except Exception as exc:
+            logger.exception("HTTP /history error")
+            return web.json_response({"error": str(exc), "messages": []}, status=500)
 
     app = web.Application()
     app.router.add_get("/health", health)
     app.router.add_post("/chat", chat)
+    app.router.add_get("/tasks", tasks_handler)
+    app.router.add_get("/history/{thread_id}", history_handler)
 
     runner = web.AppRunner(app)
     await runner.setup()
