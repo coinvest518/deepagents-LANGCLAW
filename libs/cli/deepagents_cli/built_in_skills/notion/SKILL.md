@@ -32,11 +32,14 @@ Or directly in Python:
 import os, json
 from composio import Composio
 client = Composio(api_key=os.environ["COMPOSIO_API_KEY"])
-accounts = client.connected_accounts.list()
-acc = next(a for a in accounts.items if getattr(a.toolkit, "slug", "") == "notion" and a.data.get("status") == "ACTIVE")
-result = client.tools.execute("NOTION_CREATE_NOTION_PAGE", arguments={"parent_id": "...", "title": "..."}, connected_account_id=acc.id, dangerously_skip_version_check=True)
-print(json.dumps(result, indent=2, default=str))
+# Use pre-loaded account ID — never call accounts.list()
+account_id = os.environ["COMPOSIO_NOTION_ACCOUNT_ID"]
+result = client.tools.execute("NOTION_CREATE_NOTION_PAGE", arguments={"parent_id": "...", "title": "..."}, connected_account_id=account_id, dangerously_skip_version_check=True)
+print(json.dumps(result, default=str)[:2000])
 ```
+
+## Direct tools (no Python needed)
+`NOTION_ADD_PAGE_CONTENT` and `NOTION_SEARCH_NOTION_PAGE` are wired as direct tools — call them without any Python code.
 
 **RULE:** Use exact slugs from this file. Never guess action names.
 **RULE:** Use workspace IDs below directly — do NOT call NOTION_FETCH_DATA unless you need a child ID not listed here.

@@ -1,0 +1,34 @@
+{
+  "github": {
+    "key": "COMPOSIO_GITHUB_ACCOUNT_ID",
+    "id": "ca_yph0f177iznT"
+  },
+  "gmail": {
+    "key": "COMPOSIO_GMAIL_ACCOUNT_ID",
+    "id": "ca_NrnlZqd___sE"
+  },
+  "linkedin": {
+    "key": "COMPOSIO_LINKEDIN_ACCOUNT_ID",
+    "id": "ca_AxYGMiT-jtOU"
+  },
+  "googlesheets": {
+    "key": "COMPOSIO_GOOGLESHEETS_ACCOUNT_ID",
+    "id": "ca_d2PZO0JrpWtW"
+  },
+  "twitter": {
+    "key": "COMPOSIO_TWITTER_ACCOUNT_ID",
+    "id": "ca_TrHN1O3jZ58f"
+  },
+  "telegram": {
+    "key": "COMPOSIO_TELEGRAM_ACCOUNT_ID",
+    "id": "ca_qn0hWMpwTYTm"
+  },
+  "googledrive": {
+    "key": "COMPOSIO_GOOGLEDRIVE_ACCOUNT_ID",
+    "id": "ca_RAPF5e1atKa_"
+  },
+  "google_analytics": {
+    "key": "COMPOSIO_GOOGLE_ANALYTICS_ACCOUNT_ID",
+    "id": "ca_E7SnKuBAm4aK"
+  }
+}

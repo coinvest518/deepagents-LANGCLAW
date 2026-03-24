@@ -62,6 +62,44 @@ def _build_tools(
     if settings.has_tavily:
         tools.append(web_search)
 
+    # Load Composio actions as direct LangChain tools (no Python execution needed).
+    # Gracefully skipped if composio-langchain is not installed or API key is absent.
+    composio_api_key = os.environ.get("COMPOSIO_API_KEY", "")
+    if composio_api_key:
+        try:
+            from composio import Composio  # type: ignore[import-untyped]
+            from composio_langchain import LangchainProvider  # type: ignore[import-untyped]
+
+            _COMPOSIO_ACTIONS = [
+                # Gmail
+                "GMAIL_FETCH_EMAILS", "GMAIL_SEND_EMAIL",
+                # GitHub
+                "GITHUB_LIST_REPOSITORY_ISSUES", "GITHUB_CREATE_AN_ISSUE",
+                # Slack
+                "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL",
+                # Google Sheets
+                "GOOGLESHEETS_BATCH_GET", "GOOGLESHEETS_BATCH_UPDATE",
+                # Notion
+                "NOTION_ADD_PAGE_CONTENT", "NOTION_SEARCH_NOTION_PAGE",
+                # Twitter/X
+                "TWITTER_CREATION_OF_A_POST",
+                # LinkedIn
+                "LINKEDIN_CREATE_LINKED_IN_POST",
+                # Google Drive
+                "GOOGLEDRIVE_LIST_FILES", "GOOGLEDRIVE_UPLOAD_FILE",
+                # Telegram
+                "TELEGRAM_SEND_MESSAGE",
+                # Instagram
+                "INSTAGRAM_CREATE_POST",
+            ]
+            provider = LangchainProvider()
+            client = Composio(api_key=composio_api_key, provider=provider)
+            composio_tools = client.tools.get(user_id="default", tools=_COMPOSIO_ACTIONS)
+            tools.extend(composio_tools)
+            logger.info("Loaded %d Composio tool(s) via LangchainProvider", len(composio_tools))
+        except Exception:
+            logger.warning("Composio LangChain tools skipped (import or init failed)", exc_info=True)
+
     mcp_server_info: list[Any] | None = None
     if not config.no_mcp:
         import asyncio
