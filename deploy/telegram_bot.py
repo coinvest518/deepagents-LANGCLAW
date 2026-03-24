@@ -268,44 +268,83 @@ def _count_tokens_in_state(messages: list) -> int:
 
 # Map raw tool names to human-readable status labels shown in Telegram.
 _TOOL_LABELS: dict[str, str] = {
+    # Search / web
     "web_search": "🔍 Searching web",
     "tavily_search_results_json": "🔍 Searching web",
     "tavily_search": "🔍 Searching web",
+    "fetch_url": "🌐 Fetching URL",
+    "http_request": "🌐 HTTP request",
+    # Files
     "read_file": "📄 Reading file",
     "write_file": "✏️ Writing file",
     "edit_file": "✏️ Editing file",
     "glob_search": "🗂️ Scanning files",
     "list_directory": "🗂️ Listing directory",
+    # Shell / code
     "run_command": "⚙️ Running command",
     "run_python": "🐍 Running Python",
-    "ask_user": "❓ Waiting for your input",
+    "execute": "⚙️ Executing",
+    "execute_python": "🐍 Running Python",
+    # Planning
+    "ask_user": "❓ Waiting for input",
     "task": "🤖 Spawning subagent",
     "create_task": "📋 Creating task",
     "write_todos": "📋 Planning tasks",
+    "create_cron_job": "⏰ Scheduling cron",
+    # Browser
     "browser_navigate": "🌐 Opening page",
     "browser_screenshot": "📸 Screenshot",
-    "fetch_url": "🌐 Fetching URL",
-    "http_request": "🌐 HTTP request",
-    "send_email": "📧 Sending email",
-    "github_api": "🐙 GitHub",
-    "execute": "⚙️ Executing",
-    "execute_python": "🐍 Running Python",
-    "composio": "🔗 Composio action",
-    "GOOGLESHEETS_BATCH_UPDATE": "📊 Updating Sheets",
-    "GOOGLESHEETS_BATCH_GET": "📊 Reading Sheets",
+    # Gmail
     "GMAIL_SEND_EMAIL": "📧 Sending email",
     "GMAIL_FETCH_EMAILS": "📧 Reading email",
-    "GITHUB_CREATE_AN_ISSUE": "🐙 GitHub issue",
+    "send_email": "📧 Sending email",
+    # GitHub
+    "GITHUB_CREATE_AN_ISSUE": "🐙 Creating issue",
+    "GITHUB_LIST_REPOSITORY_ISSUES": "🐙 Listing issues",
+    "github_api": "🐙 GitHub",
+    # Sheets
+    "GOOGLESHEETS_BATCH_UPDATE": "📊 Updating Sheets",
+    "GOOGLESHEETS_BATCH_GET": "📊 Reading Sheets",
+    "GOOGLESHEETS_CREATE_SPREADSHEET": "📊 Creating Sheet",
+    # Drive / Docs
+    "GOOGLEDRIVE_LIST_FILES": "📁 Google Drive",
+    "GOOGLEDRIVE_UPLOAD_FILE": "📁 Uploading to Drive",
+    # Slack
+    "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL": "💬 Slack message",
+    # Notion
+    "NOTION_ADD_PAGE_CONTENT": "📓 Writing Notion",
+    "NOTION_SEARCH_NOTION_PAGE": "📓 Searching Notion",
+    "NOTION_CREATE_NOTION_PAGE": "📓 Creating Notion page",
+    # Social
+    "TWITTER_CREATION_OF_A_POST": "🐦 Tweeting",
+    "LINKEDIN_CREATE_LINKED_IN_POST": "💼 LinkedIn post",
+    "INSTAGRAM_CREATE_POST": "📸 Instagram post",
+    "INSTAGRAM_CREATE_MEDIA_CONTAINER": "📸 Instagram media",
+    "FACEBOOK_CREATE_POST": "📘 Facebook post",
+    # Telegram
+    "TELEGRAM_SEND_MESSAGE": "✈️ Telegram message",
+    # Generic Composio fallback
+    "composio": "🔗 Composio action",
 }
 
 
-def _status_from_chunk(chunk: object) -> str:
-    """Extract a short human-readable status from an astream chunk dict."""
-    if not isinstance(chunk, dict):
-        return ""
-    # model node — LLM decided to call tools
-    if "model" in chunk:
-        msgs = chunk["model"].get("messages", []) if isinstance(chunk["model"], dict) else []
+def _tool_name_to_label(name: str) -> str:
+    """Map a raw tool name to an emoji label, falling back to the name itself."""
+    return _TOOL_LABELS.get(name, f"🔧 {name}")
+
+
+def _status_from_update(data: dict) -> str:
+    """Extract status from an 'updates' mode chunk (dict with node names as keys).
+
+    RemoteAgent.astream yields 3-tuples (namespace, mode, data).
+    When mode == 'updates', data looks like:
+        {"model": {"messages": [AIMessage(tool_calls=[...])]}}
+        {"tools": {"messages": [ToolMessage(name="web_search", ...)]}}
+    """
+    # model node — LLM decided to call tools (or is just thinking)
+    if "model" in data:
+        node = data["model"]
+        msgs = node.get("messages", []) if isinstance(node, dict) else []
         for msg in msgs:
             tcs = (
                 getattr(msg, "tool_calls", None)
@@ -314,24 +353,69 @@ def _status_from_chunk(chunk: object) -> str:
             )
             if tcs:
                 labels = [
-                    _TOOL_LABELS.get(
-                        (tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")),
-                        "🔧 " + (tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")),
+                    _tool_name_to_label(
+                        tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
                     )
                     for tc in tcs
                 ]
                 return ", ".join(labels) + "…"
         return "🤔 Thinking…"
-    # tools node — tool results coming back
-    if "tools" in chunk:
-        msgs = chunk["tools"].get("messages", []) if isinstance(chunk["tools"], dict) else []
+
+    # tools node — tool results arriving
+    if "tools" in data:
+        node = data["tools"]
+        msgs = node.get("messages", []) if isinstance(node, dict) else []
         names = []
         for msg in msgs:
             n = getattr(msg, "name", None) or (msg.get("name") if isinstance(msg, dict) else None)
             if n:
-                names.append(_TOOL_LABELS.get(n, f"🔧 {n}"))
+                names.append(_tool_name_to_label(n))
         if names:
             return ", ".join(names) + " ✓"
+
+    return ""
+
+
+def _status_from_message_chunk(msg: object) -> str:
+    """Extract status from a streaming 'messages' mode message chunk.
+
+    These arrive as the model streams — tool_call_chunks appear as soon as the
+    model starts emitting a tool call, before the tool even runs.
+    """
+    # Streaming tool call — name appears in the first chunk
+    tcc = getattr(msg, "tool_call_chunks", None) or []
+    if tcc:
+        names = [
+            tc.get("name") or ""
+            for tc in tcc
+            if isinstance(tc, dict)
+        ]
+        names = [n for n in names if n]
+        if names:
+            return ", ".join(_tool_name_to_label(n) for n in names) + "…"
+
+    # Fully resolved tool calls (non-streaming path)
+    tc_list = getattr(msg, "tool_calls", None) or []
+    if tc_list:
+        names = [
+            (tc.get("name") or "") if isinstance(tc, dict) else getattr(tc, "name", "")
+            for tc in tc_list
+        ]
+        names = [n for n in names if n]
+        if names:
+            return ", ".join(_tool_name_to_label(n) for n in names) + "…"
+
+    # Tool result — show what just finished
+    tool_name = getattr(msg, "name", None)
+    msg_type = getattr(msg, "type", "") or (msg.get("type", "") if isinstance(msg, dict) else "")
+    if tool_name and msg_type in ("tool", "ToolMessage"):
+        return _tool_name_to_label(tool_name) + " ✓"
+
+    # Model streaming content = thinking
+    content = getattr(msg, "content", None)
+    if content:
+        return "🤔 Thinking…"
+
     return ""
 
 
@@ -349,28 +433,63 @@ async def _run_agent(
     ran inside subgraphs — removed it to fix that.
 
     progress_cb: optional async callable(status: str) — called with a short
-    status string each time a meaningful step is detected.  Rate-limited
-    internally to at most one call per 1.5 seconds.
+    status string each time a meaningful step is detected.
+    Rate-limited to at most once per 0.5 seconds; heartbeat fires "🤔 Thinking…"
+    every 4 seconds if no other status is produced.
     """
+    import time as _time
     config: dict = {"configurable": {"thread_id": thread_id}}
     try:
         _last_progress = 0.0
+        _last_heartbeat = _time.monotonic()
+        _MIN_INTERVAL = 0.5    # minimum seconds between any two progress edits
+        _HEARTBEAT_EVERY = 4.0 # show "thinking" if silent for this long
+
+        async def _maybe_update(status: str) -> None:
+            nonlocal _last_progress, _last_heartbeat
+            if progress_cb is None or not status:
+                return
+            now = _time.monotonic()
+            if now - _last_progress < _MIN_INTERVAL:
+                return
+            _last_progress = now
+            _last_heartbeat = now
+            try:
+                await progress_cb(status)  # type: ignore[misc]
+            except Exception:
+                pass
+
         # Drain the stream — runs agent + tools to completion.
+        # RemoteAgent.astream yields 3-tuples: (namespace, mode, data)
         async for chunk in agent.astream(  # type: ignore[union-attr]
             {"messages": [{"role": "user", "content": message}]},
             config=config,
         ):
             if progress_cb is not None:
-                import time as _time
+                # Unpack the 3-tuple that RemoteAgent yields
+                if isinstance(chunk, tuple) and len(chunk) == 3:
+                    _ns, mode, data = chunk
+                    if mode == "updates" and isinstance(data, dict):
+                        status = _status_from_update(data)
+                        await _maybe_update(status)
+                    elif mode == "messages":
+                        msg = data[0] if isinstance(data, tuple) else data
+                        status = _status_from_message_chunk(msg)
+                        await _maybe_update(status)
+                else:
+                    # Fallback: legacy dict chunk (shouldn't happen but keep safe)
+                    if isinstance(chunk, dict):
+                        status = _status_from_update(chunk)
+                        await _maybe_update(status)
+
+                # Heartbeat: if silent too long, show "thinking"
                 now = _time.monotonic()
-                if now - _last_progress >= 1.5:
-                    status = _status_from_chunk(chunk)
-                    if status:
-                        _last_progress = now
-                        try:
-                            await progress_cb(status)  # type: ignore[misc]
-                        except Exception:
-                            pass
+                if now - _last_heartbeat >= _HEARTBEAT_EVERY:
+                    _last_heartbeat = now
+                    try:
+                        await progress_cb("🤔 Thinking…")  # type: ignore[misc]
+                    except Exception:
+                        pass
 
         # Read the final state for the response text.
         state = await agent.aget_state(config)  # type: ignore[union-attr]
@@ -626,12 +745,74 @@ async def _quick_chat(message: str) -> tuple[str, bool]:
 # HeadlessApp — the minimal "app" stub that TelegramIntegration expects
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Agent mode system — per-chat persona switching via /mode command
+# ---------------------------------------------------------------------------
+
+_MODES_DIR = _REPO / ".deepagents" / "modes"
+
+# Registry: name → (emoji, one-line description)
+_MODE_REGISTRY: dict[str, tuple[str, str]] = {
+    "default":    ("🤖", "FDWA AI assistant — full capabilities"),
+    "content":    ("✍️", "Content writer — blogs, articles, how-to guides"),
+    "researcher": ("🔬", "Deep researcher — exhaustive sourced research"),
+    "social":     ("📱", "Social media manager — LinkedIn, Twitter, Instagram"),
+    "ralph":      ("🔁", "Autonomous builder — loops until task is done"),
+    "coder":      ("💻", "Coding specialist — write, debug, review code"),
+}
+
+_mode_content_cache: dict[str, str] = {}
+
+
+def _load_mode_content(mode: str) -> str:
+    """Load the markdown content for *mode* from .deepagents/modes/, cached."""
+    if mode in _mode_content_cache:
+        return _mode_content_cache[mode]
+    if mode == "default":
+        return ""
+    path = _MODES_DIR / f"{mode}.md"
+    if path.exists():
+        content = path.read_text(encoding="utf-8").strip()
+        _mode_content_cache[mode] = content
+        return content
+    return ""
+
+
+def _build_mode_list_message(current: str) -> str:
+    lines = ["<b>🎭 Agent Modes</b>\n"]
+    for name, (emoji, desc) in _MODE_REGISTRY.items():
+        active = " ← <i>active</i>" if name == current else ""
+        lines.append(f"{emoji} <code>/mode {name}</code> — {desc}{active}")
+    lines.append("\nType <code>/mode &lt;name&gt;</code> to switch.")
+    lines.append("Type <code>/mode default</code> to reset.")
+    return "\n".join(lines)
+
+
+def _inject_mode_context(message: str, mode: str) -> str:
+    """Prepend the mode's instructions to *message* if a non-default mode is active."""
+    if mode == "default":
+        return message
+    content = _load_mode_content(mode)
+    if not content:
+        return message
+    emoji, desc = _MODE_REGISTRY.get(mode, ("🎭", mode))
+    return (
+        f"[ACTIVE MODE: {desc}]\n\n"
+        f"{content}\n\n"
+        f"---\n\n"
+        f"{message}"
+    )
+
+
 class HeadlessApp:
     """Minimal app shim so TelegramIntegration can forward messages without a UI.
 
     TelegramIntegration.handle_telegram_update checks for ``app._handle_external_message``
     and ``app.call_after_refresh``.  This class provides both, routing messages
     directly to the LangGraph agent.
+
+    Mode switching: /mode <name> changes the agent's active persona for the
+    session by prepending mode-specific instructions to every message.
     """
 
     def __init__(self, agent: object, tg: TelegramIntegration) -> None:
@@ -642,11 +823,18 @@ class HeadlessApp:
         # Per-chat lock — prevents concurrent streams to the same thread which
         # causes ClosedResourceError on the langgraph server.
         self._locks: dict[int, asyncio.Lock] = {}
+        # Per-chat active mode. "default" = normal FDWA agent.
+        self._modes: dict[int, str] = {}
+        # Per-chat pending mode confirmation: chat_id → mode name awaiting /yes
+        self._pending_mode: dict[int, str] = {}
 
     def _get_thread_id(self, chat_id: int) -> str:
         if chat_id not in self._threads:
             self._threads[chat_id] = generate_thread_id()
         return self._threads[chat_id]
+
+    def _get_mode(self, chat_id: int) -> str:
+        return self._modes.get(chat_id, "default")
 
     def reset_thread(self, chat_id: int) -> None:
         """Start a fresh conversation for *chat_id* on the next message."""
@@ -656,6 +844,64 @@ class HeadlessApp:
         """Immediately invoke *fn* — no UI refresh needed in headless mode."""
         if callable(fn):
             fn()
+
+    def _handle_mode_command(self, text: str, chat_id: int) -> str | None:
+        """Handle /mode command. Returns a reply string, or None if not a mode command."""
+        stripped = text.strip()
+
+        # /yes or /confirm — confirm a pending mode switch
+        if stripped in ("/yes", "/confirm", "yes", "confirm"):
+            pending = self._pending_mode.pop(chat_id, None)
+            if pending:
+                self._modes[chat_id] = pending
+                emoji, desc = _MODE_REGISTRY.get(pending, ("🎭", pending))
+                return (
+                    f"✅ Switched to <b>{emoji} {desc}</b> mode.\n\n"
+                    f"This session will now use the {pending} persona. "
+                    f"Type <code>/mode default</code> to reset."
+                )
+            return None  # no pending switch, treat as regular message
+
+        # /no or /cancel — cancel pending mode switch
+        if stripped in ("/no", "/cancel", "no", "cancel"):
+            if self._pending_mode.pop(chat_id, None):
+                return "❌ Mode switch cancelled. Staying in current mode."
+            return None
+
+        if not stripped.lower().startswith("/mode"):
+            return None
+
+        parts = stripped.split(maxsplit=1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        # /mode (no arg) — list modes
+        if not arg:
+            current = self._get_mode(chat_id)
+            return _build_mode_list_message(current)
+
+        # /mode default — reset immediately (no confirmation needed)
+        if arg == "default":
+            self._modes.pop(chat_id, None)
+            self._pending_mode.pop(chat_id, None)
+            return "✅ Reset to default FDWA agent mode."
+
+        # /mode <unknown>
+        if arg not in _MODE_REGISTRY:
+            known = ", ".join(f"<code>{k}</code>" for k in _MODE_REGISTRY)
+            return f"❓ Unknown mode <code>{arg}</code>.\nAvailable: {known}"
+
+        # Valid mode — ask for confirmation (human in the loop)
+        emoji, desc = _MODE_REGISTRY[arg]
+        self._pending_mode[chat_id] = arg
+        current = self._get_mode(chat_id)
+        cur_emoji, cur_desc = _MODE_REGISTRY.get(current, ("🤖", current))
+        return (
+            f"⚠️ Switch agent mode?\n\n"
+            f"From: {cur_emoji} <b>{cur_desc}</b>\n"
+            f"To:   {emoji} <b>{desc}</b>\n\n"
+            f"This will add <b>{arg}</b> mode instructions to your messages for this session.\n\n"
+            f"Reply <code>/yes</code> to confirm or <code>/no</code> to cancel."
+        )
 
     async def _handle_external_message(
         self,
@@ -672,18 +918,30 @@ class HeadlessApp:
         if telegram_chat_id is None:
             return
 
+        # Handle /mode commands without going to the agent
+        mode_reply = self._handle_mode_command(message, telegram_chat_id)
+        if mode_reply is not None:
+            self._tg.send_message_html(telegram_chat_id, mode_reply)
+            return
+
         if telegram_chat_id not in self._locks:
             self._locks[telegram_chat_id] = asyncio.Lock()
 
         async with self._locks[telegram_chat_id]:
             thread_id = self._get_thread_id(telegram_chat_id)
-            logger.info("chat_id=%d thread=%s: %.80s", telegram_chat_id, thread_id, message)
+            active_mode = self._get_mode(telegram_chat_id)
+            logger.info(
+                "chat_id=%d thread=%s mode=%s: %.80s",
+                telegram_chat_id, thread_id, active_mode, message,
+            )
+
+            # Inject active mode context into the message before sending to agent
+            agent_message = _inject_mode_context(message, active_mode)
 
             # Show typing + placeholder immediately.
             await self._tg._start_thinking(telegram_chat_id)
 
             # Build a live-progress callback that edits the placeholder message.
-            # Rate-limited to ≥1.5 s between edits; skips if text unchanged.
             _last_status: list[str] = [""]
 
             async def _progress(status: str) -> None:
@@ -703,8 +961,14 @@ class HeadlessApp:
                 except Exception:
                     pass
 
+            # Show mode badge in status if non-default
+            if active_mode != "default":
+                emoji, _ = _MODE_REGISTRY.get(active_mode, ("🎭", active_mode))
+                await _progress(f"{emoji} {active_mode.title()} mode active…")
+
             # Musa routing: ask Musa first unless message clearly needs full agent.
-            if not _needs_full_agent(message) and CHAT_MODEL != MODEL:
+            # Skip Musa if a non-default mode is active (always use full agent for modes).
+            if active_mode == "default" and not _needs_full_agent(message) and CHAT_MODEL != MODEL:
                 logger.info("Musa routing (model=%s): %.60s", CHAT_MODEL, message)
                 await _progress("💬 Musa (quick-chat)…")
                 musa_reply, handoff = await _quick_chat(message)
@@ -712,14 +976,15 @@ class HeadlessApp:
                     logger.info("Musa reply to chat_id=%d: %.80s", telegram_chat_id, musa_reply)
                     self._tg.deliver_reply(telegram_chat_id, musa_reply)
                     return
-                # Musa couldn't handle it — escalate visibly
                 logger.info("Musa HANDOFF → full agent for chat_id=%d", telegram_chat_id)
                 await _progress("🔄 Escalating to full agent…")
             else:
                 await _progress("🤖 Full agent starting…")
 
             # Full agent path: tasks, tool calls, anything non-trivial.
-            response = await _run_agent(self._agent, message, thread_id, progress_cb=_progress)
+            response = await _run_agent(
+                self._agent, agent_message, thread_id, progress_cb=_progress,
+            )
 
         # Deliver outside the lock so the next message can start processing
         # while we're waiting for Telegram's API to accept the reply.

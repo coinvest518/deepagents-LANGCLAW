@@ -555,13 +555,18 @@ class TelegramIntegration:
         if cmd in {"/start", "/help"}:
             self.send_message(
                 chat_id,
-                "Telegram integration with Deep Agents CLI.\n\n"
+                "🤖 FDWA AI Agent\n\n"
                 "Commands:\n"
-                "/start, /help - Show this help\n"
-                "/reset - Clear conversation history\n"
-                "/research - Research assistant\n"
-                "/code - Coding assistant\n"
-                "/review - Review assistant\n\n"
+                "/start, /help — Show this help\n"
+                "/reset — Clear conversation history\n"
+                "/mode — List agent modes\n"
+                "/mode content — Switch to content writer\n"
+                "/mode researcher — Switch to deep research mode\n"
+                "/mode social — Switch to social media manager\n"
+                "/mode ralph — Switch to autonomous builder\n"
+                "/mode coder — Switch to coding specialist\n"
+                "/mode default — Reset to default FDWA agent\n\n"
+                "After /mode <name>, reply /yes to confirm or /no to cancel.\n\n"
                 "Send any text to interact with the agent.",
             )
             return
