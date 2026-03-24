@@ -151,30 +151,38 @@ def _pick_chat_model() -> str:
 CHAT_MODEL: str = _pick_chat_model()
 
 # Action verbs / nouns that clearly signal a task needing the full agent.
+# Keep this list tight — generic words cause casual questions to route to full agent.
 _TASK_WORDS = frozenset({
-    # Actions
-    "find", "search", "create", "make", "build", "write", "send",
-    "get", "show", "list", "check", "update", "delete", "run", "open",
-    "fetch", "read", "save", "add", "remove", "set", "deploy", "push",
+    # Clear task verbs
+    "find", "search", "create", "write", "send",
+    "list", "check", "update", "delete", "run",
+    "fetch", "save", "add", "remove", "set", "deploy", "push",
     "generate", "summarize", "analyze", "fix", "debug",
     "install", "download", "upload", "convert", "translate", "edit",
-    "rename", "move", "copy", "compare", "calculate", "count",
-    "connect", "access", "see", "view", "post", "tweet", "email",
-    "schedule", "automate", "test", "verify", "pull", "clone",
-    # Service nouns (mentions = needs API)
+    "rename", "move", "copy", "post", "tweet", "email",
+    "schedule", "automate", "test", "pull", "clone",
+    # Service nouns — any mention means needs API
     "gmail", "github", "sheets", "spreadsheet", "drive", "docs",
     "slack", "notion", "dropbox", "twitter", "linkedin", "instagram",
-    "facebook", "youtube", "telegram", "serpapi", "analytics",
-    "calendar", "notion", "airtable",
+    "facebook", "youtube", "serpapi", "analytics",
+    "calendar", "airtable",
 })
 
-# Phrases that mean "I can't do this, escalate" — Musa says these when handing off.
-# Detecting them triggers the real code-level handoff instead of delivering as answer.
+# Phrases that mean "I'm handing this off" — Musa says these when escalating.
+# Detecting them: (a) returns (text, True) so user sees Musa's reply, AND
+# (b) triggers real code-level handoff to run the full agent in background.
+# Include Musa's natural handoff phrases from agent_soul.md.
 _HANDOFF_PHRASES = (
+    # Natural Musa handoff language (from soul)
+    "on it 🔄",
+    "on it.",
+    "let me check that",
+    "running that now",
+    "let me pull it up",
     "i'll hand that off",
     "hand that off",
     "i'll pass this",
-    "full system",
+    # Escalation signals
     "main agent",
     "escalat",
     "can't do that directly",
@@ -570,41 +578,23 @@ async def _run_agent(
 # Musa lightweight tool set (Cerebras tool loop — no LangGraph needed)
 # ---------------------------------------------------------------------------
 
+# Musa has TWO tools only — no web search (causes hallucination on non-web queries).
+# web_search removed: small LLMs call it for anything ("errors", "what's up", etc.)
+# If Musa genuinely needs web or system data, it calls handoff_to_agent.
 _MUSA_TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "handoff_to_agent",
             "description": (
-                "Escalate this request to the full AI agent that has API access. "
-                "Use this for ANY request involving: Gmail, GitHub, Google Sheets, "
-                "Google Drive, Google Docs, Slack, Notion, Dropbox, Twitter, "
-                "LinkedIn, Instagram, Facebook, YouTube, Telegram, web scraping, "
-                "file operations, code execution, database queries, "
-                "or any task beyond casual conversation. "
-                "Do NOT attempt to answer — just call this tool immediately."
+                "Pass this request to the full AI agent. Use this when the request needs "
+                "ANYTHING beyond casual conversation — system checks, errors, logs, tools, "
+                "APIs, files, web search, Gmail, GitHub, Sheets, social media, "
+                "memory lookup, LangSmith traces, or any real task. "
+                "If you are not 100% sure you can answer from your soul context alone, "
+                "call this immediately. Do NOT guess or make up answers."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": (
-                "Search the internet for LIVE external information only: "
-                "current stock prices, breaking news, today's weather, "
-                "recent sports scores, new product releases. "
-                "Do NOT use for general knowledge, FDWA system questions, "
-                "or anything about connected services."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search query"},
-                },
-                "required": ["query"],
-            },
         },
     },
     {
@@ -794,10 +784,11 @@ async def _quick_chat(message: str) -> tuple[str, bool]:
 
         if not text:
             return ("", True)
-        # If Musa's reply contains a handoff phrase, escalate instead of delivering
+        # If Musa's reply contains a handoff phrase, escalate but keep the text
+        # so the user sees Musa's "On it 🔄" before the full agent starts.
         if any(phrase in text.lower() for phrase in _HANDOFF_PHRASES):
             logger.info("Musa handoff phrase detected — escalating to full agent")
-            return ("", True)
+            return (text, True)
         return (text, False)
 
     except Exception:
@@ -1157,7 +1148,9 @@ class HeadlessApp:
                     self._tg.deliver_reply(telegram_chat_id, musa_reply)
                     return
                 logger.info("Musa HANDOFF → full agent for chat_id=%d", telegram_chat_id)
-                await _progress("🔄 Escalating to full agent…")
+                # Show Musa's natural handoff phrase ("On it 🔄") if it produced one,
+                # otherwise fall back to a generic step.
+                await _progress(musa_reply or "🔄 On it…")
             else:
                 await _progress("🤖 Starting…")
 
