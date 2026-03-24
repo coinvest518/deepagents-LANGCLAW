@@ -94,7 +94,8 @@ def _build_tools(
             ]
             provider = LangchainProvider()
             client = Composio(api_key=composio_api_key, provider=provider)
-            composio_tools = client.tools.get(user_id="default", tools=_COMPOSIO_ACTIONS)
+            entity_id = os.environ.get("COMPOSIO_ENTITY_ID", "default")
+            composio_tools = client.tools.get(user_id=entity_id, tools=_COMPOSIO_ACTIONS)
             tools.extend(composio_tools)
             logger.info("Loaded %d Composio tool(s) via LangchainProvider", len(composio_tools))
         except Exception:
