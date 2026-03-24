@@ -62,60 +62,17 @@ def _build_tools(
     if settings.has_tavily:
         tools.append(web_search)
 
-    # Load Composio actions as direct LangChain tools (no Python execution needed).
-    # Gracefully skipped if composio-langchain is not installed or API key is absent.
-    # Action lists and entity routing are centralised in composio_router.py.
-    composio_api_key = os.environ.get("COMPOSIO_API_KEY", "")
-    if composio_api_key:
+    # Single Composio dispatcher — replaces 48+ individual LangChain tools.
+    # The agent reads composio SKILL.md to know available action names, then calls
+    # this one tool instead of picking from a 50-tool list.
+    # Gracefully skipped if composio SDK is not installed or API key is absent.
+    if os.environ.get("COMPOSIO_API_KEY", ""):
         try:
-            from composio import Composio  # type: ignore[import-untyped]
-            from composio_langchain import (
-                LangchainProvider,  # type: ignore[import-untyped]
-            )
-
-            from deepagents_cli.composio_router import (
-                _ENTITY_DEFAULT,
-                _ENTITY_PRIMARY,
-                ACTIONS_DEFAULT,
-                ACTIONS_PRIMARY,
-            )
-
-            provider = LangchainProvider()
-            client = Composio(api_key=composio_api_key, provider=provider)
-
-            # Primary entity: Gmail, GitHub, Drive, Docs, Sheets, Analytics,
-            #                  LinkedIn, Twitter, Telegram, Instagram, Facebook, YouTube
-            composio_tools = client.tools.get(
-                user_id=_ENTITY_PRIMARY, tools=ACTIONS_PRIMARY
-            )
-            tools.extend(composio_tools)
-            logger.info(
-                "Loaded %d Composio tool(s) for entity '%s'",
-                len(composio_tools),
-                _ENTITY_PRIMARY,
-            )
-
-            # Secondary entity: Slack, Notion, Dropbox (connected under "default")
-            try:
-                composio_tools_default = client.tools.get(
-                    user_id=_ENTITY_DEFAULT, tools=ACTIONS_DEFAULT
-                )
-                tools.extend(composio_tools_default)
-                logger.info(
-                    "Loaded %d Composio tool(s) for entity '%s'",
-                    len(composio_tools_default),
-                    _ENTITY_DEFAULT,
-                )
-            except Exception:
-                logger.warning(
-                    "Composio default-entity tools skipped (Slack/Notion/Dropbox)",
-                    exc_info=True,
-                )
+            from deepagents_cli.composio_dispatcher import composio_action
+            tools.append(composio_action)
+            logger.info("Composio dispatcher tool loaded (single entry point)")
         except Exception:
-            logger.warning(
-                "Composio LangChain tools skipped (import or init failed)",
-                exc_info=True,
-            )
+            logger.warning("Composio dispatcher skipped", exc_info=True)
 
     mcp_server_info: list[Any] | None = None
     if not config.no_mcp:

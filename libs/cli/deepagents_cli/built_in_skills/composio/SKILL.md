@@ -5,9 +5,18 @@ description: Use Composio to interact with connected services — GitHub, Gmail,
 
 # Composio Skill
 
-## IMPORTANT: Try direct tools first
+## IMPORTANT: Use the `composio_action` tool
 
-The following Composio actions are already wired as **direct tools** — call them without any Python code:
+All Composio operations go through ONE tool: **`composio_action`**
+
+```
+composio_action(action="ACTION_NAME", arguments={...})
+```
+
+Entity routing (primary vs Slack/Notion/Dropbox default) is handled automatically.
+Never use web_search or Python scripts for these — call composio_action directly.
+
+### Quick reference by service
 
 **Gmail:** `GMAIL_FETCH_EMAILS`, `GMAIL_SEND_EMAIL`, `GMAIL_LIST_LABELS`, `GMAIL_GET_ATTACHMENT`
 
@@ -17,7 +26,7 @@ The following Composio actions are already wired as **direct tools** — call th
 
 **Google Docs:** `GOOGLEDOCS_CREATE_DOCUMENT`, `GOOGLEDOCS_GET_DOCUMENT`, `GOOGLEDOCS_SEARCH_DOCUMENTS`, `GOOGLEDOCS_UPDATE_EXISTING_DOCUMENT`
 
-**Google Sheets** (via Drive OAuth — sheets-native account has broken token):
+**Google Sheets** (use Drive OAuth — sheets-native account has broken token):
 `GOOGLESHEETS_BATCH_GET`, `GOOGLESHEETS_BATCH_UPDATE`
 
 **Google Analytics:** `GOOGLEANALYTICS_RUN_A_REPORT`, `GOOGLEANALYTICS_LIST_ACCOUNTS`
