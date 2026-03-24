@@ -1,0 +1,38 @@
+# Git history — never needed in container (~20-50MB saved)
+.git/
+.gitignore
+
+# Claude Code local AI memory — only for IDE sessions, not the deployed agent
+memory/
+
+# Local Remotion test artifacts — created during local testing, not needed on server
+libs/cli/deepagents_cli/built_in_skills/remotion/remotion-projects/
+libs/cli/deepagents_cli/built_in_skills/remotion/test_output.mp4
+**/remotion-projects/
+**/*.mp4
+
+# Python bytecode — rebuilt automatically inside the container
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Node local installs — container installs its own
+node_modules/
+npm-debug.log*
+
+# Local virtual environments — container uses its own pip installs
+.venv/
+venv/
+env/
+
+# Local dev / IDE files
+.env.local
+.DS_Store
+Thumbs.db
+
+# Workspace outputs from social-media-agent (local renders/research)
+examples/social-media-agent/workspace/
