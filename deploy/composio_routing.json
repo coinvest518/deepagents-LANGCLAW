@@ -1,0 +1,295 @@
+{
+  "_comment": "Non-secret Composio routing config. Safe for agents to read. Contains account IDs and toolkit mappings — NOT API keys.",
+  "_refresh": "Run deploy/scripts/composio_health_check.py --refresh to update account IDs from live data.",
+
+  "entities": {
+    "primary": "pg-test-e862c589-3f43-4cd7-9023-cc6ec5123c23",
+    "default": "default"
+  },
+
+  "toolkits": {
+    "gmail": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_GMAIL_ACCOUNT_ID",
+      "account_id": "ca_NrnlZqd___sE",
+      "test_action": "GMAIL_LIST_LABELS",
+      "test_args": {},
+      "key_actions": [
+        "GMAIL_FETCH_EMAILS",
+        "GMAIL_SEND_EMAIL",
+        "GMAIL_LIST_LABELS",
+        "GMAIL_GET_ATTACHMENT",
+        "GMAIL_REPLY_TO_EMAIL",
+        "GMAIL_CREATE_LABEL",
+        "GMAIL_MOVE_EMAIL",
+        "GMAIL_DELETE_EMAIL",
+        "GMAIL_ADD_LABEL_TO_EMAIL",
+        "GMAIL_FETCH_EMAIL_BY_ID"
+      ]
+    },
+    "github": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_GITHUB_ACCOUNT_ID",
+      "account_id": "ca_yph0f177iznT",
+      "test_action": "GITHUB_LIST_REPOSITORY_ISSUES",
+      "test_args": {"owner": "octocat", "repo": "Hello-World"},
+      "key_actions": [
+        "GITHUB_LIST_REPOSITORY_ISSUES",
+        "GITHUB_CREATE_AN_ISSUE",
+        "GITHUB_LIST_COMMITS",
+        "GITHUB_GET_CODE_CHANGES_DIFF_SUMMARY",
+        "GITHUB_STAR_A_REPOSITORY_FOR_THE_AUTHENTICATED_USER",
+        "GITHUB_LIST_PULL_REQUESTS",
+        "GITHUB_CREATE_A_PULL_REQUEST",
+        "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER",
+        "GITHUB_GET_A_REPOSITORY",
+        "GITHUB_LIST_REPOSITORY_CONTENTS",
+        "GITHUB_GET_REPOSITORY_CONTENT"
+      ]
+    },
+    "googledrive": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_GOOGLEDRIVE_ACCOUNT_ID",
+      "account_id": "ca_RAPF5e1atKa_",
+      "test_action": "GOOGLEDRIVE_LIST_FILES",
+      "test_args": {},
+      "key_actions": [
+        "GOOGLEDRIVE_LIST_FILES",
+        "GOOGLEDRIVE_UPLOAD_FILE",
+        "GOOGLEDRIVE_GET_FILE_BY_ID",
+        "GOOGLEDRIVE_CREATE_FOLDER",
+        "GOOGLEDRIVE_MOVE_FILE",
+        "GOOGLEDRIVE_COPY_FILE",
+        "GOOGLEDRIVE_DELETE_FILE",
+        "GOOGLEDRIVE_CREATE_FILE_FROM_TEXT",
+        "GOOGLEDRIVE_FIND_FILE",
+        "GOOGLEDRIVE_SHARE_FILE"
+      ]
+    },
+    "googlesheets": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_GOOGLEDRIVE_ACCOUNT_ID",
+      "account_id": "ca_RAPF5e1atKa_",
+      "_note": "Uses Drive account — sheets-native OAuth token is broken. Always use COMPOSIO_GOOGLEDRIVE_ACCOUNT_ID.",
+      "test_action": "GOOGLEDRIVE_LIST_FILES",
+      "test_args": {"query": "mimeType='application/vnd.google-apps.spreadsheet'"},
+      "key_actions": [
+        "GOOGLESHEETS_BATCH_GET",
+        "GOOGLESHEETS_BATCH_UPDATE",
+        "GOOGLESHEETS_CREATE_SPREADSHEET",
+        "GOOGLESHEETS_APPEND_GOOGLE_SHEET",
+        "GOOGLESHEETS_CLEAR_VALUES",
+        "GOOGLESHEETS_INSERT_ROWS",
+        "GOOGLESHEETS_LOOKUP_SPREADSHEET_ROW"
+      ],
+      "workflow": "1. GOOGLEDRIVE_LIST_FILES with query=mimeType sheet to get spreadsheet_id. 2. Use spreadsheet_id in GOOGLESHEETS_BATCH_GET with ranges=[\"Sheet1!A1:Z100\"]"
+    },
+    "googledocs": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_GOOGLEDOCS_ACCOUNT_ID",
+      "account_id": "ca_8YkEOhu3T-Wd",
+      "test_action": "GOOGLEDOCS_SEARCH_DOCUMENTS",
+      "test_args": {"query": "test"},
+      "key_actions": [
+        "GOOGLEDOCS_CREATE_DOCUMENT",
+        "GOOGLEDOCS_GET_DOCUMENT",
+        "GOOGLEDOCS_SEARCH_DOCUMENTS",
+        "GOOGLEDOCS_UPDATE_EXISTING_DOCUMENT",
+        "GOOGLEDOCS_DELETE_DOCUMENT",
+        "GOOGLEDOCS_GET_DOCUMENT_CONTENT",
+        "GOOGLEDOCS_CREATE_DOCUMENT_MARKDOWN"
+      ]
+    },
+    "google_analytics": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_GOOGLE_ANALYTICS_ACCOUNT_ID",
+      "account_id": "ca_E7SnKuBAm4aK",
+      "test_action": "GOOGLEANALYTICS_LIST_ACCOUNTS",
+      "test_args": {},
+      "key_actions": [
+        "GOOGLEANALYTICS_RUN_A_REPORT",
+        "GOOGLEANALYTICS_LIST_ACCOUNTS",
+        "GOOGLEANALYTICS_LIST_PROPERTIES",
+        "GOOGLEANALYTICS_GET_METADATA",
+        "GOOGLEANALYTICS_RUN_REALTIME_REPORT",
+        "GOOGLEANALYTICS_RUN_PIVOT_REPORT"
+      ]
+    },
+    "linkedin": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_LINKEDIN_ACCOUNT_ID",
+      "account_id": "ca_AxYGMiT-jtOU",
+      "test_action": "LINKEDIN_GET_USER_INFO",
+      "test_args": {},
+      "key_actions": [
+        "LINKEDIN_CREATE_LINKED_IN_POST",
+        "LINKEDIN_GET_PROFILE",
+        "LINKEDIN_GET_USER_INFO",
+        "LINKEDIN_DELETE_POST",
+        "LINKEDIN_GET_POST_ANALYTICS",
+        "LINKEDIN_FETCH_PROFILE_POSTS",
+        "LINKEDIN_GET_PROFILE_FOLLOWERS"
+      ]
+    },
+    "twitter": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_TWITTER_ACCOUNT_ID",
+      "account_id": "ca_TrHN1O3jZ58f",
+      "test_action": "TWITTER_USER_LOOKUP_ME",
+      "test_args": {},
+      "key_actions": [
+        "TWITTER_CREATION_OF_A_POST",
+        "TWITTER_SEARCH_TWEETS",
+        "TWITTER_HOME_TIMELINE",
+        "TWITTER_LOOKUP_USER_BY_USER_NAME",
+        "TWITTER_GET_USER_MENTIONS_TIMELINE",
+        "TWITTER_DELETE_A_POST",
+        "TWITTER_USER_LOOKUP_ME",
+        "TWITTER_FOLLOW_A_USER",
+        "TWITTER_LIKE_A_TWEET",
+        "TWITTER_REPOST_A_TWEET"
+      ]
+    },
+    "telegram": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_TELEGRAM_ACCOUNT_ID",
+      "account_id": "ca_qn0hWMpwTYTm",
+      "test_action": "TELEGRAM_LIST_CHATS",
+      "test_args": {},
+      "key_actions": [
+        "TELEGRAM_SEND_MESSAGE",
+        "TELEGRAM_LIST_CHATS",
+        "TELEGRAM_GET_MESSAGES",
+        "TELEGRAM_SEND_PHOTO",
+        "TELEGRAM_SEND_DOCUMENT",
+        "TELEGRAM_DELETE_MESSAGE",
+        "TELEGRAM_FORWARD_MESSAGE",
+        "TELEGRAM_GET_CHAT_INFO",
+        "TELEGRAM_GET_CHAT_MEMBERS_COUNT"
+      ]
+    },
+    "instagram": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_INSTAGRAM_ACCOUNT_ID",
+      "account_id": "ca_J8db7D84W8m6",
+      "test_action": "INSTAGRAM_GET_USER_PROFILE",
+      "test_args": {},
+      "key_actions": [
+        "INSTAGRAM_CREATE_POST",
+        "INSTAGRAM_GET_MEDIA_INFO",
+        "INSTAGRAM_GET_USER_PROFILE",
+        "INSTAGRAM_FETCH_COMMENTS",
+        "INSTAGRAM_CREATE_STORY",
+        "INSTAGRAM_GET_HASHTAG_ID",
+        "INSTAGRAM_GET_INSIGHTS",
+        "INSTAGRAM_REPLY_TO_COMMENT"
+      ]
+    },
+    "facebook": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_FACEBOOK_ACCOUNT_ID",
+      "account_id": "ca_qujf8XxJkcZc",
+      "test_action": "FACEBOOK_GET_USER_PAGES",
+      "test_args": {},
+      "key_actions": [
+        "FACEBOOK_POST_PHOTO",
+        "FACEBOOK_GET_USER_FEED",
+        "FACEBOOK_CREATE_POST",
+        "FACEBOOK_GET_USER_PAGES",
+        "FACEBOOK_GET_PAGE_POSTS",
+        "FACEBOOK_PAGE_POST_MESSAGE",
+        "FACEBOOK_GET_PAGE_INSIGHTS",
+        "FACEBOOK_LIKE_POST",
+        "FACEBOOK_COMMENT_ON_POST",
+        "FACEBOOK_DELETE_POST"
+      ]
+    },
+    "youtube": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_YOUTUBE_ACCOUNT_ID",
+      "account_id": "ca_WsQIrwNqA_l_",
+      "test_action": "YOUTUBE_GET_CHANNEL_INFORMATION",
+      "test_args": {},
+      "key_actions": [
+        "YOUTUBE_LIST_VIDEOS",
+        "YOUTUBE_SEARCH_YOU_TUBE_VIDEOS",
+        "YOUTUBE_GET_VIDEO_DETAILS",
+        "YOUTUBE_LIST_PLAYLISTS",
+        "YOUTUBE_GET_CHANNEL_INFORMATION",
+        "YOUTUBE_LIST_COMMENTS",
+        "YOUTUBE_POST_COMMENT",
+        "YOUTUBE_LIKE_VIDEO",
+        "YOUTUBE_SUBSCRIBE_TO_CHANNEL",
+        "YOUTUBE_LIST_PLAYLIST_ITEMS"
+      ]
+    },
+    "serpapi": {
+      "entity": "primary",
+      "account_id_env": "COMPOSIO_SERPAPI_ACCOUNT_ID",
+      "account_id": "ca_gImhMFTfT1n3",
+      "test_action": null,
+      "test_args": {},
+      "key_actions": []
+    },
+    "slack": {
+      "entity": "default",
+      "account_id_env": "COMPOSIO_SLACK_ACCOUNT_ID",
+      "account_id": "ca_nbRXg7EeJgvx",
+      "test_action": "SLACK_LIST_CHANNELS",
+      "test_args": {},
+      "key_actions": [
+        "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL",
+        "SLACK_LIST_CHANNELS",
+        "SLACK_FETCH_CONVERSATION_HISTORY",
+        "SLACK_GET_USER_INFO",
+        "SLACK_INVITE_USER_TO_CHANNEL",
+        "SLACK_CREATE_CHANNEL",
+        "SLACK_LIST_MEMBERS_IN_A_CHANNEL",
+        "SLACK_GETS_USER_ID_BY_USERNAME",
+        "SLACK_REPLY_TO_MESSAGE",
+        "SLACK_ADDS_A_REACTION_TO_AN_ITEM",
+        "SLACK_PINS_AN_ITEM_TO_A_CHANNEL"
+      ]
+    },
+    "notion": {
+      "entity": "default",
+      "account_id_env": "COMPOSIO_NOTION_ACCOUNT_ID",
+      "account_id": "ca_VCkrXCRVWUVp",
+      "test_action": "NOTION_SEARCH_NOTION_PAGE",
+      "test_args": {"query": "test"},
+      "key_actions": [
+        "NOTION_ADD_PAGE_CONTENT",
+        "NOTION_SEARCH_NOTION_PAGE",
+        "NOTION_CREATE_PAGE",
+        "NOTION_GET_PAGE",
+        "NOTION_UPDATE_PAGE",
+        "NOTION_DELETE_PAGE",
+        "NOTION_CREATE_DATABASE_ENTRY",
+        "NOTION_QUERY_DATABASE",
+        "NOTION_GET_DATABASE",
+        "NOTION_LIST_ALL_USERS",
+        "NOTION_CREATE_COMMENT"
+      ]
+    },
+    "dropbox": {
+      "entity": "default",
+      "account_id_env": "COMPOSIO_DROPBOX_ACCOUNT_ID",
+      "account_id": "ca__qavNcrS7vNU",
+      "test_action": "DROPBOX_LIST_FOLDER",
+      "test_args": {"path": ""},
+      "key_actions": [
+        "DROPBOX_LIST_FOLDER",
+        "DROPBOX_UPLOAD_FILE",
+        "DROPBOX_DOWNLOAD_FILE",
+        "DROPBOX_CREATE_FOLDER",
+        "DROPBOX_GET_FILE_METADATA",
+        "DROPBOX_MOVE_FILE",
+        "DROPBOX_DELETE_FILE",
+        "DROPBOX_COPY_FILE",
+        "DROPBOX_CREATE_SHARED_LINK",
+        "DROPBOX_SEARCH_FILES",
+        "DROPBOX_GET_ACCOUNT_INFO"
+      ]
+    }
+  }
+}

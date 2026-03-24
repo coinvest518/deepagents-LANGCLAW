@@ -64,42 +64,58 @@ def _build_tools(
 
     # Load Composio actions as direct LangChain tools (no Python execution needed).
     # Gracefully skipped if composio-langchain is not installed or API key is absent.
+    # Action lists and entity routing are centralised in composio_router.py.
     composio_api_key = os.environ.get("COMPOSIO_API_KEY", "")
     if composio_api_key:
         try:
             from composio import Composio  # type: ignore[import-untyped]
-            from composio_langchain import LangchainProvider  # type: ignore[import-untyped]
+            from composio_langchain import (
+                LangchainProvider,  # type: ignore[import-untyped]
+            )
 
-            _COMPOSIO_ACTIONS = [
-                # Gmail
-                "GMAIL_FETCH_EMAILS", "GMAIL_SEND_EMAIL",
-                # GitHub
-                "GITHUB_LIST_REPOSITORY_ISSUES", "GITHUB_CREATE_AN_ISSUE",
-                # Slack
-                "SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL",
-                # Google Sheets
-                "GOOGLESHEETS_BATCH_GET", "GOOGLESHEETS_BATCH_UPDATE",
-                # Notion
-                "NOTION_ADD_PAGE_CONTENT", "NOTION_SEARCH_NOTION_PAGE",
-                # Twitter/X
-                "TWITTER_CREATION_OF_A_POST",
-                # LinkedIn
-                "LINKEDIN_CREATE_LINKED_IN_POST",
-                # Google Drive
-                "GOOGLEDRIVE_LIST_FILES", "GOOGLEDRIVE_UPLOAD_FILE",
-                # Telegram
-                "TELEGRAM_SEND_MESSAGE",
-                # Instagram
-                "INSTAGRAM_CREATE_POST",
-            ]
+            from deepagents_cli.composio_router import (
+                _ENTITY_DEFAULT,
+                _ENTITY_PRIMARY,
+                ACTIONS_DEFAULT,
+                ACTIONS_PRIMARY,
+            )
+
             provider = LangchainProvider()
             client = Composio(api_key=composio_api_key, provider=provider)
-            entity_id = os.environ.get("COMPOSIO_ENTITY_ID", "default")
-            composio_tools = client.tools.get(user_id=entity_id, tools=_COMPOSIO_ACTIONS)
+
+            # Primary entity: Gmail, GitHub, Drive, Docs, Sheets, Analytics,
+            #                  LinkedIn, Twitter, Telegram, Instagram, Facebook, YouTube
+            composio_tools = client.tools.get(
+                user_id=_ENTITY_PRIMARY, tools=ACTIONS_PRIMARY
+            )
             tools.extend(composio_tools)
-            logger.info("Loaded %d Composio tool(s) via LangchainProvider", len(composio_tools))
+            logger.info(
+                "Loaded %d Composio tool(s) for entity '%s'",
+                len(composio_tools),
+                _ENTITY_PRIMARY,
+            )
+
+            # Secondary entity: Slack, Notion, Dropbox (connected under "default")
+            try:
+                composio_tools_default = client.tools.get(
+                    user_id=_ENTITY_DEFAULT, tools=ACTIONS_DEFAULT
+                )
+                tools.extend(composio_tools_default)
+                logger.info(
+                    "Loaded %d Composio tool(s) for entity '%s'",
+                    len(composio_tools_default),
+                    _ENTITY_DEFAULT,
+                )
+            except Exception:
+                logger.warning(
+                    "Composio default-entity tools skipped (Slack/Notion/Dropbox)",
+                    exc_info=True,
+                )
         except Exception:
-            logger.warning("Composio LangChain tools skipped (import or init failed)", exc_info=True)
+            logger.warning(
+                "Composio LangChain tools skipped (import or init failed)",
+                exc_info=True,
+            )
 
     mcp_server_info: list[Any] | None = None
     if not config.no_mcp:
@@ -233,7 +249,6 @@ def make_graph() -> Any:  # noqa: ANN401
     chat_id = os.environ.get("DA_SERVER_CHAT_ID") or os.environ.get(
         "TELEGRAM_AI_OWNER_CHAT_ID"
     )
-    always_listen = os.environ.get("TELEGRAM_ALWAYS_LISTEN_CHAT_IDS")
     if bot_token:
         logger.info("Telegram notifier configured (using provided env vars)")
     else:
@@ -261,7 +276,8 @@ def make_graph() -> Any:  # noqa: ANN401
             logger.debug("Could not start Telegram notifier thread", exc_info=True)
     elif bot_token and not chat_id:
         logger.warning(
-            "Telegram bot token found but no chat id (DA_SERVER_CHAT_ID or TELEGRAM_AI_OWNER_CHAT_ID)."
+            "Telegram bot token found but no chat id "
+            "(DA_SERVER_CHAT_ID or TELEGRAM_AI_OWNER_CHAT_ID)."
         )
 
     return agent
