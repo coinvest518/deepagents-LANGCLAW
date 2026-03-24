@@ -79,8 +79,8 @@ export default function CommandCenter() {
         fetch('/api/alchemy?type=wallet').then(r => r.json()),
         fetch('/api/alchemy?type=gas').then(r => r.json()),
       ])
-      if (r.status === 'fulfilled') setRuns(r.value.runs || [])
-      if (s.status === 'fulfilled') setStats(s.value)
+      if (r.status === 'fulfilled' && !r.value.error) setRuns(r.value.runs || [])
+      if (s.status === 'fulfilled' && !s.value.error) setStats(s.value)
       if (p.status === 'fulfilled') setPrices(p.value.prices || [])
       if (w.status === 'fulfilled' && !w.value.error) setWallet(w.value)
       if (g.status === 'fulfilled') setGas(g.value.gas || [])

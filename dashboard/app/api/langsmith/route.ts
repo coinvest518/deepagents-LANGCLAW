@@ -4,6 +4,28 @@ const LS_KEY = process.env.LANGSMITH_API_KEY || ''
 const LS_PROJECT = process.env.LANGSMITH_PROJECT || 'deeperagents'
 const BASE = 'https://api.smith.langchain.com/api/v1'
 
+// Cache the session UUID so we only look it up once per process.
+let _sessionId: string | null = null
+
+async function getSessionId(): Promise<string | null> {
+  if (_sessionId) return _sessionId
+  const res = await fetch(`${BASE}/sessions?name=${encodeURIComponent(LS_PROJECT)}`, {
+    headers: { 'x-api-key': LS_KEY },
+    next: { revalidate: 0 },
+  })
+  if (!res.ok) {
+    console.error('LangSmith sessions lookup failed', res.status, await res.text().catch(() => ''))
+    return null
+  }
+  const sessions = await res.json()
+  // API returns an array; find exact name match
+  const match = Array.isArray(sessions)
+    ? sessions.find((s: any) => s.name === LS_PROJECT)
+    : null
+  _sessionId = match?.id ?? null
+  return _sessionId
+}
+
 async function ls(path: string, body?: object) {
   const res = await fetch(`${BASE}${path}`, {
     method: body ? 'POST' : 'GET',
@@ -90,10 +112,18 @@ export async function GET(req: Request) {
   }
 
   try {
+    // Resolve project name → session UUID (cached after first call)
+    const sessionId = await getSessionId()
+    if (!sessionId) {
+      return NextResponse.json(
+        { error: `LangSmith project '${LS_PROJECT}' not found. Check LANGSMITH_PROJECT env var.` },
+        { status: 404 }
+      )
+    }
+
     if (type === 'runs') {
-      // is_root must be a filter string in the REST API, not a top-level field
       const data = await ls('/runs/query', {
-        session_name: LS_PROJECT,
+        session: [sessionId],
         filter: 'eq(is_root, true)',
         limit: 25,
       })
@@ -103,7 +133,7 @@ export async function GET(req: Request) {
 
     if (type === 'stats') {
       const data = await ls('/runs/query', {
-        session_name: LS_PROJECT,
+        session: [sessionId],
         filter: 'eq(is_root, true)',
         limit: 100,
       })
@@ -138,18 +168,20 @@ export async function GET(req: Request) {
     }
 
     if (type === 'trace') {
-      // Full trace tree for a single run: returns parent + all child spans
       const traceId = searchParams.get('id')
       if (!traceId) return NextResponse.json({ error: 'id required' }, { status: 400 })
       const data = await ls('/runs/query', {
-        session_name: LS_PROJECT,
+        session: [sessionId],
         filter: `eq(trace_id, "${traceId}")`,
         limit: 100,
       })
       const spans = (data?.runs || []).map(mapRun)
-      // Sort by start_time so tree renders top-down
       spans.sort((a: any, b: any) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())
       return NextResponse.json({ spans, trace_id: traceId })
+    }
+
+    if (type === 'status') {
+      return NextResponse.json({ connected: true, project: LS_PROJECT, session_id: sessionId })
     }
 
     return NextResponse.json({ error: 'Unknown type' }, { status: 400 })
