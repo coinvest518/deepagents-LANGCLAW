@@ -67,6 +67,22 @@ for t in tools:
     print(t.slug)
 ```
 
+## Google Sheets — how to use correctly
+
+**To LIST what spreadsheets exist** → use `GOOGLEDRIVE_LIST_FILES` (no spreadsheet_id needed):
+```
+GOOGLEDRIVE_LIST_FILES with query="mimeType='application/vnd.google-apps.spreadsheet'"
+```
+This returns file names and their IDs. Use the `id` field as `spreadsheet_id` for BATCH_GET.
+
+**`GOOGLESHEETS_BATCH_GET` requires a real `spreadsheet_id`** — it is NOT optional.
+- Get it from `GOOGLEDRIVE_LIST_FILES` results, or from the Google Sheets URL:
+  `https://docs.google.com/spreadsheets/d/<spreadsheet_id>/edit`
+- `ranges` must be a **list** of range strings, e.g. `["Sheet1!A1:Z100"]` — not a string, not null
+- Do NOT call `GOOGLESHEETS_BATCH_GET` until you have a real spreadsheet_id
+
+**GOOGLESHEETS_LIST_SPREADSHEETS does NOT exist** — use `GOOGLEDRIVE_LIST_FILES` to discover sheets.
+
 ## CRITICAL rules
 
 - Direct tools (listed above) need NO Python code — just call them
@@ -74,3 +90,4 @@ for t in tools:
 - Always use `dangerously_skip_version_check=True`
 - **Always truncate output**: `json.dumps(result, default=str)[:2000]`
 - If an action name is unknown, use discover actions first (limit=20)
+- **Never pass `"null"` or `"None"` as an argument value** — omit optional args entirely

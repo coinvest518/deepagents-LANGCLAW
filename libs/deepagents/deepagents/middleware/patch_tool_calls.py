@@ -16,25 +16,41 @@ logger = logging.getLogger("deepagents.patch_tool_calls")
 _COERCE_ARGS: dict[str, dict[str, str]] = {
     "write_todos": {"todos": "list"},
     "web_search": {"session_params": "dict", "crawl_params": "dict"},
+    "GOOGLESHEETS_BATCH_GET": {"ranges": "list"},
+    "GOOGLESHEETS_BATCH_UPDATE": {"data": "list"},
 }
+
+# String values that represent "no value" — open-weight LLMs send these
+# instead of omitting optional params. Strip them so Pydantic uses defaults.
+_NULL_STRINGS: frozenset[str] = frozenset({"null", "none", "undefined"})
+
+
+def _strip_null_string_args(args: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Remove args whose value is a null-sentinel string like 'null' or 'None'."""
+    cleaned = {k: v for k, v in args.items() if not (isinstance(v, str) and v.strip().lower() in _NULL_STRINGS)}
+    return cleaned, len(cleaned) != len(args)
 
 
 def _coerce_tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
     """Coerce string-serialized args to their expected Python types.
 
-    Some LLMs (especially open-weight models) serialize list/dict arguments
-    as JSON strings, e.g. ``'[{"content": "..."}]'`` instead of an actual
-    list.  This causes Pydantic validation errors at tool execution time.
-
-    We fix them here, after the model call but before tool dispatch.
+    Two passes:
+    1. Generic: strip any arg whose value is "null"/"None"/"undefined" (open-weight
+       LLMs send these for optional params instead of omitting them).
+    2. Specific: per-tool coercion map for args that must be a list or dict.
     """
     name = tool_call.get("name", "")
-    coerce_map = _COERCE_ARGS.get(name, {})
-    if not coerce_map:
-        return tool_call
-
     args = dict(tool_call.get("args", {}))
     changed = False
+
+    # Pass 1 — generic null-string stripping (applies to ALL tools)
+    args, stripped = _strip_null_string_args(args)
+    if stripped:
+        changed = True
+        logger.debug("Stripped null-string args from %s: remaining keys %s", name, list(args.keys()))
+
+    # Pass 2 — per-tool type coercion
+    coerce_map = _COERCE_ARGS.get(name, {})
     for arg_name, expected_type in coerce_map.items():
         val = args.get(arg_name)
         if not isinstance(val, str):
@@ -59,7 +75,6 @@ def _coerce_tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
                 args[arg_name] = {}
                 changed = True
             else:
-                # Drop the arg entirely so it defaults to None
                 args.pop(arg_name, None)
                 changed = True
 
