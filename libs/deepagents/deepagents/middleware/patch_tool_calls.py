@@ -15,6 +15,7 @@ logger = logging.getLogger("deepagents.patch_tool_calls")
 # serializes as JSON strings instead of native Python objects.
 _COERCE_ARGS: dict[str, dict[str, str]] = {
     "write_todos": {"todos": "list"},
+    "composio_action": {"arguments": "dict"},
     "web_search": {"session_params": "dict", "crawl_params": "dict"},
     "GOOGLESHEETS_BATCH_GET": {"ranges": "list"},
     "GOOGLESHEETS_BATCH_UPDATE": {"data": "list"},

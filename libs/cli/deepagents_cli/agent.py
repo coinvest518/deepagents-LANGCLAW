@@ -16,6 +16,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, LocalShellBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.middleware import MemoryMiddleware, SkillsMiddleware
+from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -774,6 +775,10 @@ def create_cli_agent(
     # Build middleware stack based on enabled features
     agent_middleware = []
     agent_middleware.append(ConfigurableModelMiddleware())
+    # Coerce JSON-string args back to list/dict before Pydantic validation.
+    # LLMs (especially open-weight) pass structured params as serialized strings.
+    # This covers write_todos, composio_action, web_search, and others.
+    agent_middleware.append(PatchToolCallsMiddleware())
 
     # Add ask_user middleware (must be early so its tool is available)
     from deepagents_cli.ask_user import AskUserMiddleware
