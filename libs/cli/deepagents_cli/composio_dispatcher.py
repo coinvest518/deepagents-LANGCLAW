@@ -39,7 +39,7 @@ def _get_account_id(action: str) -> str | None:
 
 
 @tool
-def composio_action(action: str, arguments: dict[str, Any] | None = None) -> str:
+def composio_action(action: str, arguments: dict[str, Any] | str | None = None) -> str:
     """Execute any Composio action by name.
 
     Use this for ALL connected service operations: Gmail, GitHub, Google Drive,
@@ -68,6 +68,16 @@ def composio_action(action: str, arguments: dict[str, Any] | None = None) -> str
         composio_action("SLACK_FETCH_CHANNELS", {})
         composio_action("TWITTER_CREATION_OF_A_POST", {"text": "Hello world!"})
     """
+    # LLMs sometimes pass arguments as a JSON string instead of a dict — coerce it.
+    if isinstance(arguments, str):
+        stripped = arguments.strip()
+        if stripped in ("", "null", "none", "undefined", "{}", "[]"):
+            arguments = {}
+        else:
+            try:
+                arguments = json.loads(stripped)
+            except json.JSONDecodeError:
+                arguments = {}
     if arguments is None:
         arguments = {}
 
