@@ -16,7 +16,6 @@ from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, LocalShellBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.middleware import MemoryMiddleware, SkillsMiddleware
-from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -778,7 +777,13 @@ def create_cli_agent(
     # Coerce JSON-string args back to list/dict before Pydantic validation.
     # LLMs (especially open-weight) pass structured params as serialized strings.
     # This covers write_todos, composio_action, web_search, and others.
-    agent_middleware.append(PatchToolCallsMiddleware())
+    # Lazy import — skipped gracefully if the langgraph version on this host
+    # doesn't export the types patch_tool_calls depends on (Runtime, Overwrite).
+    try:
+        from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
+        agent_middleware.append(PatchToolCallsMiddleware())
+    except Exception:
+        logger.warning("PatchToolCallsMiddleware unavailable — JSON arg coercion skipped")
 
     # Add ask_user middleware (must be early so its tool is available)
     from deepagents_cli.ask_user import AskUserMiddleware
