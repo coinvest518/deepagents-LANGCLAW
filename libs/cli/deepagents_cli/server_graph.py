@@ -242,10 +242,11 @@ def make_graph() -> Any:  # noqa: ANN401
 
 try:
     graph = make_graph()
-except Exception as exc:
+except BaseException as exc:  # BaseException catches SystemExit from inner sys.exit() calls
     logger.critical("Failed to initialize server graph", exc_info=True)
     print(  # noqa: T201  # stderr fallback — logger may not reach parent process
-        f"Failed to initialize server graph: {exc}\n{traceback.format_exc()}",
+        f"DEEPAGENTS STARTUP FAILURE: {type(exc).__name__}: {exc}\n{traceback.format_exc()}",
         file=sys.stderr,
+        flush=True,
     )
     sys.exit(1)
