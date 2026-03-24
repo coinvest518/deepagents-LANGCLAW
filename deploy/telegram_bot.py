@@ -559,9 +559,11 @@ async def _run_agent(
 
         return "No response received.", []
 
+    except asyncio.CancelledError:
+        raise  # let /stop propagate
     except Exception:
         logger.exception("Agent error (thread=%s)", thread_id)
-        return "Sorry, I encountered an error — please try again.", []
+        raise  # bubble up so _handle_external_message shows the real error
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +900,10 @@ class HeadlessApp:
         # Per-chat pending interrupt: chat_id → Future resolved when user answers
         # an ask_user question from the agent.
         self._pending_interrupts: dict[int, asyncio.Future] = {}
+        # Per-chat cancellation flag — set by /stop, checked in _run_agent loop.
+        self._stop_flags: dict[int, bool] = {}
+        # Per-chat running asyncio.Task — cancel()able on /stop.
+        self._running_tasks: dict[int, asyncio.Task] = {}
 
     def _get_thread_id(self, chat_id: int) -> str:
         if chat_id not in self._threads:
@@ -1059,6 +1065,22 @@ class HeadlessApp:
                 future.set_result(message)
             return
 
+        # ── /stop / /cancel — kill running task ─────────────────────────────
+        if message.strip().lower() in ("/stop", "/cancel", "stop", "cancel"):
+            self._stop_flags[telegram_chat_id] = True
+            task = self._running_tasks.pop(telegram_chat_id, None)
+            if task and not task.done():
+                task.cancel()
+                self._tg.send_message_html(
+                    telegram_chat_id,
+                    "🛑 <b>Stopped.</b> Task cancelled. Send a new message to start fresh.",
+                )
+            else:
+                self._tg.send_message_html(
+                    telegram_chat_id, "Nothing running right now."
+                )
+            return
+
         # ── /mode commands ───────────────────────────────────────────────────
         mode_reply = self._handle_mode_command(message, telegram_chat_id)
         if mode_reply is not None:
@@ -1142,37 +1164,61 @@ class HeadlessApp:
             # ── Full agent run with interrupt loop ───────────────────────────
             from langgraph.types import Command as _LGCommand  # noqa: PLC0415
 
-            agent_input: object = {"messages": [{"role": "user", "content": agent_message}]}
-            response, interrupts = await _run_agent(
-                self._agent, agent_input, thread_id, progress_cb=_progress,
-            )
+            self._stop_flags.pop(telegram_chat_id, None)  # clear any stale stop flag
 
-            _MAX_INTERRUPT_ROUNDS = 10
-            for _round in range(_MAX_INTERRUPT_ROUNDS):
-                if not interrupts:
-                    break
-                resume_data: dict = {}
-                for intr in interrupts:
-                    intr_value = getattr(intr, "value", None)
-                    intr_id = getattr(intr, "id", f"intr_{_round}")
-                    if isinstance(intr_value, dict) and intr_value.get("type") == "ask_user":
-                        await _progress("❓ Waiting for your answer…")
-                        answer = await self._ask_user_in_telegram(intr_value, telegram_chat_id)
-                        resume_data[intr_id] = answer
-                    else:
-                        logger.warning(
-                            "Unhandled interrupt type (chat_id=%d): %r",
-                            telegram_chat_id, intr_value,
-                        )
-                        resume_data[intr_id] = {"status": "cancelled"}
-
-                await _progress("🔄 Resuming…")
-                response, interrupts = await _run_agent(
-                    self._agent,
-                    _LGCommand(resume=resume_data),
-                    thread_id,
-                    progress_cb=_progress,
+            async def _run_full_agent() -> str:
+                """Inner coroutine — wrapped in a Task so /stop can cancel it."""
+                nonlocal response, interrupts  # type: ignore[misc]
+                agent_inp: object = {"messages": [{"role": "user", "content": agent_message}]}
+                resp, intrs = await _run_agent(
+                    self._agent, agent_inp, thread_id, progress_cb=_progress,
                 )
+
+                _MAX_INTERRUPT_ROUNDS = 10
+                for _round in range(_MAX_INTERRUPT_ROUNDS):
+                    if not intrs or self._stop_flags.get(telegram_chat_id):
+                        break
+                    resume_data: dict = {}
+                    for intr in intrs:
+                        intr_value = getattr(intr, "value", None)
+                        intr_id = getattr(intr, "id", f"intr_{_round}")
+                        if isinstance(intr_value, dict) and intr_value.get("type") == "ask_user":
+                            await _progress("❓ Waiting for your answer…")
+                            answer = await self._ask_user_in_telegram(intr_value, telegram_chat_id)
+                            resume_data[intr_id] = answer
+                        else:
+                            logger.warning(
+                                "Unhandled interrupt type (chat_id=%d): %r",
+                                telegram_chat_id, intr_value,
+                            )
+                            resume_data[intr_id] = {"status": "cancelled"}
+
+                    await _progress("🔄 Resuming…")
+                    resp, intrs = await _run_agent(
+                        self._agent,
+                        _LGCommand(resume=resume_data),
+                        thread_id,
+                        progress_cb=_progress,
+                    )
+                return resp
+
+            response = ""
+            interrupts = []
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(_run_full_agent())
+                self._running_tasks[telegram_chat_id] = task
+                response = await task
+            except asyncio.CancelledError:
+                logger.info("Task cancelled for chat_id=%d", telegram_chat_id)
+                response = "🛑 Task stopped."
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Agent error (chat_id=%d)", telegram_chat_id)
+                # Show the real error so you can diagnose — not a generic "sorry"
+                err_short = str(exc)[:300]
+                response = f"❌ <b>Error:</b> <code>{err_short}</code>\n\nSend <code>/reset</code> to start fresh."
+            finally:
+                self._running_tasks.pop(telegram_chat_id, None)
 
         # Deliver outside the lock
         logger.info("Agent reply to chat_id=%d: %.80s", telegram_chat_id, response)
