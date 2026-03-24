@@ -119,7 +119,7 @@ def create_project(title: str, duration: int, fps: int, width: int, height: int,
     else:
         comp = _default_template(title, fps, frames)
 
-    with open(os.path.join(project_dir, "src", "Composition.tsx"), "w") as f:
+    with open(os.path.join(project_dir, "src", "Composition.tsx"), "w", encoding="utf-8") as f:
         f.write(comp)
 
     print(f"Project created: {project_dir}")
@@ -209,7 +209,7 @@ def _tiktok_template(title: str, fps: int, frames: int) -> str:
                     </div>
 
                     {{/* Bottom CTA */}}
-                    <Sequence from={{{{Math.floor({frames} * 0.7)}}}}>
+                    <Sequence from={{Math.floor({frames} * 0.7)}}>
                         <div style={{{{ position: 'absolute', bottom: 120, fontSize: 28, color: '#e94560', fontFamily: 'sans-serif', fontWeight: 700 }}}}>
                             ↓ Follow for more
                         </div>

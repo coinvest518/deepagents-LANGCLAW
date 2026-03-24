@@ -3,13 +3,23 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System dependencies needed by langgraph-cli and build tools
+# System dependencies: build tools + ffmpeg (for Remotion video rendering)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        build-essential \
        git \
        curl \
+       ffmpeg \
     && rm -rf /var/lib/apt/lists/*
+
+# Node.js 20 LTS — required for Remotion video rendering
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Remotion CLI + renderer (global install so npx remotion render works anywhere)
+RUN npm install -g remotion @remotion/cli @remotion/renderer --prefer-offline 2>/dev/null \
+    || npm install -g remotion @remotion/cli @remotion/renderer
 
 WORKDIR /app
 

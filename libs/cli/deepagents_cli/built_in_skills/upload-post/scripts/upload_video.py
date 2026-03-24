@@ -58,7 +58,7 @@ def main():
     client = get_client()
 
     kwargs = {
-        "file_path": args.file,
+        "video_path": args.file,
         "title": args.title,
         "user": args.user,
         "platforms": args.platforms,

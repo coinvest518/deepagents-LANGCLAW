@@ -69,13 +69,17 @@ def render(project_dir: str, out: str, composition: str, codec: str,
     else:
         entry = "src/index.ts"
 
+    # On Windows npx is npx.cmd; on Linux/Mac it's npx
+    npx = "npx.cmd" if sys.platform == "win32" else "npx"
     cmd = [
-        "npx", "remotion", "render",
+        npx, "remotion", "render",
         entry,
         composition,
         abs_out,
         f"--codec={codec}",
         f"--concurrency={concurrency}",
+        # Chrome Headless Shell needs --no-sandbox on Windows and headless Linux servers
+        "--browser-args=--no-sandbox",
     ]
     if quality != 80:
         cmd.append(f"--crf={100 - quality}")
