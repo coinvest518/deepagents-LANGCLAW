@@ -103,6 +103,9 @@ RUN pip install "ollama>=0.6.0" \
 # Persistent storage lives under ~/.deepagents (sessions, cron logs, workspace cache)
 # Render mounts a disk here when you add a persistent disk to the service.
 ENV DEEPAGENTS_HOME=/root/.deepagents
+# Playwright/Chromium runs as root in Docker — must disable sandbox or it refuses to start.
+# browser-use picks this up automatically; direct playwright calls should also respect it.
+ENV PLAYWRIGHT_CHROMIUM_SANDBOX=false
 # LangGraph SDK requires LANGSMITH_API_KEY even for local dev servers —
 # it's a client-side check. "local" satisfies it; override in Render env
 # vars with your real LangSmith key if you have one.

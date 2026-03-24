@@ -150,21 +150,49 @@ def _pick_chat_model() -> str:
 
 CHAT_MODEL: str = _pick_chat_model()
 
-# Action verbs that clearly signal a task needing the full agent.
+# Action verbs / nouns that clearly signal a task needing the full agent.
 _TASK_WORDS = frozenset({
+    # Actions
     "find", "search", "create", "make", "build", "write", "send",
     "get", "show", "list", "check", "update", "delete", "run", "open",
     "fetch", "read", "save", "add", "remove", "set", "deploy", "push",
     "generate", "summarize", "analyze", "fix", "debug",
     "install", "download", "upload", "convert", "translate", "edit",
     "rename", "move", "copy", "compare", "calculate", "count",
+    "connect", "access", "see", "view", "post", "tweet", "email",
+    "schedule", "automate", "test", "verify", "pull", "clone",
+    # Service nouns (mentions = needs API)
+    "gmail", "github", "sheets", "spreadsheet", "drive", "docs",
+    "slack", "notion", "dropbox", "twitter", "linkedin", "instagram",
+    "facebook", "youtube", "telegram", "serpapi", "analytics",
+    "calendar", "notion", "airtable",
 })
+
+# Phrases that mean "I can't do this, escalate" — Musa says these when handing off.
+# Detecting them triggers the real code-level handoff instead of delivering as answer.
+_HANDOFF_PHRASES = (
+    "i'll hand that off",
+    "hand that off",
+    "i'll pass this",
+    "full system",
+    "main agent",
+    "escalat",
+    "can't do that directly",
+    "i don't have access to",
+    "i cannot access",
+    "need to use the",
+)
 
 
 def _needs_full_agent(text: str) -> bool:
-    """Return True when message clearly needs tools — skip Musa, go straight to NVIDIA."""
+    """Return True when message clearly needs tools — skip Musa, go to full agent."""
     lower = text.strip().lower()
-    return len(text.strip()) > 200 or any(w in lower.split() for w in _TASK_WORDS)
+    words = lower.split()
+    return (
+        len(text.strip()) > 200
+        or any(w in words for w in _TASK_WORDS)
+        or any(phrase in lower for phrase in _HANDOFF_PHRASES)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +351,8 @@ _TOOL_LABELS: dict[str, str] = {
     "FACEBOOK_CREATE_POST": "📘 Facebook post",
     # Telegram
     "TELEGRAM_SEND_MESSAGE": "✈️ Telegram message",
-    # Generic Composio fallback
+    # Composio single dispatcher
+    "composio_action": "🔗 Composio",
     "composio": "🔗 Composio action",
 }
 
@@ -543,8 +572,30 @@ _MUSA_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "handoff_to_agent",
+            "description": (
+                "Escalate this request to the full AI agent that has API access. "
+                "Use this for ANY request involving: Gmail, GitHub, Google Sheets, "
+                "Google Drive, Google Docs, Slack, Notion, Dropbox, Twitter, "
+                "LinkedIn, Instagram, Facebook, YouTube, Telegram, web scraping, "
+                "file operations, code execution, database queries, "
+                "or any task beyond casual conversation. "
+                "Do NOT attempt to answer — just call this tool immediately."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "web_search",
-            "description": "Search the web for current information on any topic.",
+            "description": (
+                "Search the internet for LIVE external information only: "
+                "current stock prices, breaking news, today's weather, "
+                "recent sports scores, new product releases. "
+                "Do NOT use for general knowledge, FDWA system questions, "
+                "or anything about connected services."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -562,26 +613,18 @@ _MUSA_TOOLS = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_url",
-            "description": "Fetch text content from a URL.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "The URL to fetch"},
-                },
-                "required": ["url"],
-            },
-        },
-    },
 ]
+
+
+_MUSA_HANDOFF_SENTINEL = "__HANDOFF__"
 
 
 async def _execute_musa_tool(name: str, args: dict) -> str:
     """Execute one Musa tool and return a result string."""
     try:
+        if name == "handoff_to_agent":
+            return _MUSA_HANDOFF_SENTINEL
+
         if name == "get_time":
             import datetime
             return datetime.datetime.now().strftime("%A, %B %d, %Y at %H:%M:%S")
@@ -683,6 +726,9 @@ async def _cerebras_chat(message: str, soul: str) -> str | None:
                         tc_args = {}
                 logger.info("Musa tool call: %s(%s)", tc_name, tc_args)
                 result = await _execute_musa_tool(tc_name, tc_args)
+                if result == _MUSA_HANDOFF_SENTINEL:
+                    logger.info("Musa handoff_to_agent called — escalating to full agent")
+                    return None  # triggers handoff=True in _quick_chat
                 msgs.append(ToolMessage(content=result, tool_call_id=tc_id))
 
         # Exhausted iterations — ask for final answer without tools
@@ -744,7 +790,13 @@ async def _quick_chat(message: str) -> tuple[str, bool]:
             r = await llm.ainvoke([SM(content=soul), HumanMessage(content=message)])
             text = str(r.content).strip()
 
-        return (text, False) if text else ("", True)
+        if not text:
+            return ("", True)
+        # If Musa's reply contains a handoff phrase, escalate instead of delivering
+        if any(phrase in text.lower() for phrase in _HANDOFF_PHRASES):
+            logger.info("Musa handoff phrase detected — escalating to full agent")
+            return ("", True)
+        return (text, False)
 
     except Exception:
         logger.warning("Musa quick-chat (Ollama) failed — trying Cerebras fallback")

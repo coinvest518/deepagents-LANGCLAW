@@ -23,13 +23,18 @@ form submissions, or dynamic content — things that a simple HTTP fetch cannot 
 ## Basic usage
 
 ```python
-import asyncio
+import asyncio, os
 from browser_use import Agent as BrowserAgent
+from browser_use.browser.browser import Browser, BrowserConfig
 from langchain.chat_models import init_chat_model
 
 async def browse(task: str, model_name: str = "mistralai:mistral-large-latest") -> str:
     llm = init_chat_model(model_name)
-    agent = BrowserAgent(task=task, llm=llm)
+    # Pass --no-sandbox when running as root (required in Docker/Render)
+    browser = Browser(config=BrowserConfig(
+        extra_chromium_args=["--no-sandbox", "--disable-setuid-sandbox"]
+    ))
+    agent = BrowserAgent(task=task, llm=llm, browser=browser)
     result = await agent.run()
     return str(result)
 
@@ -55,6 +60,7 @@ except ImportError:
 
 - Chromium is pre-installed in the Docker container (Playwright install runs at build time)
 - For local dev: run `playwright install chromium` once after `pip install browser-use`
+- **Docker/Render (runs as root):** Always pass `--no-sandbox` via `BrowserConfig(extra_chromium_args=[...])` — without it Chromium will refuse to start
 - browser-use uses a real browser — it's slower than HTTP fetch but handles anything a human can see
 - Delegate browser tasks to a subagent to keep the main context clean
 - BROWSER_USE_AVAILABLE is False if Playwright is not installed — fall back to firecrawl/hyperbrowser

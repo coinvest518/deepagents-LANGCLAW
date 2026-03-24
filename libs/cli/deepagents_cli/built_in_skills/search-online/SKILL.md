@@ -1,71 +1,74 @@
 ---
 name: search-online
-description: Enable agents to perform web searches using configured providers (Composio/Tavily, HyperBrowser, Firecrawl). Detects available providers from environment and delegates searches to the appropriate tool.
+description: Search the EXTERNAL internet for current prices, news, trends, public info, or anything not stored internally. Uses Tavily (primary) with HyperBrowser fallback for site-scoped scraping. NOT for internal system queries.
 ---
 
 # Search Online Skill
 
-This built-in skill teaches agents how to perform web searches using the environment-configured providers.
+## IMPORTANT: Know when to use this
 
-Key points:
+**USE `web_search` for:**
+- Current prices, news, trending topics, public info
+- Researching external websites, companies, people
+- Anything on the open internet you don't already know
 
-- The CLI can use multiple provider backends for web search. Common providers in this workspace:
-  - Composio (used as the Tavily / `searchonline` bridge)
-  - HyperBrowser
-  - Firecrawl
+**DO NOT use `web_search` for:**
+- What tools/integrations are connected → you already know them (see system prompt)
+- Checking notes, links, or data saved in AstraDB → query the knowledge base directly
+- Gmail, GitHub, Google Drive, social media → use `composio_action` tool
+- Internal system questions (what's running, what's configured, etc.)
 
-- Ensure the provider packages are installed in the Python environment (examples):
-  - `composio-langchain` or the org-specific composio client
-  - `langchain-hyperbrowser` (or the provider package name used in your environment)
-  - `firecrawl-py`
+---
 
-- Ensure API keys / connection info are set in environment variables. Typical names present in this repo's `.env`:
-  - `COMPOSIO_API_KEY`, `COMPOSIO_API_URL` (Composio / Tavily)
-  - `HYPERBROWSER_API_KEY`
-  - `FIRECRAWL_API_KEY`
+## Available web tools
 
-How agents should use this skill
+### `web_search` — Tavily-powered internet search
 
-1. Provider detection
+The callable tool is **`web_search`** (not "search-online" — that's this skill's name, not a tool).
 
-   - Prefer providers in this order: Composio (Composio can proxy Tavily-like searches), HyperBrowser, Firecrawl.
-   - Use the presence of both the package import and the env key to decide availability.
+```
+web_search(query="your search query", max_results=5, topic="general")
+```
 
-2. Invocation pattern (recommended)
+- `topic`: `"general"` | `"news"` | `"finance"`
+- Falls back to HyperBrowser automatically for site-scoped queries (`site:domain.com`)
+- Returns: `{results: [{title, url, content, score}, ...], query}`
 
-   - Use `task` to spawn a short-lived subagent to perform web searches and save findings to files. This keeps web requests isolated and auditable.
+### `fetch_url` — Fetch a single URL as markdown
 
-   Subagent template:
+```
+fetch_url(url="https://example.com")
+```
 
-   ```
-   Research [TOPIC]. Use the `web_search` or `searchonline` tool provided by the runtime. Save findings to `research_[topic]/findings_[i].md`.
-   Use up to N web searches (3-5) and include source URLs and short quotes.
-   ```
+Use when you have a specific URL and want the page content.
 
-3. Tool usage details
+### `http_request` — Raw HTTP requests
 
-   - If `COMPOSIO_API_KEY` and `COMPOSIO_API_URL` are present, call the `searchonline` tool (Composio-backed).
+```
+http_request(url="https://api.example.com/data", method="GET", headers={...})
+```
 
-   **Composio as gateway:** Composio is a multi-capability connector that can proxy or orchestrate many downstream services (including Tavily). Treat Composio as the primary gateway for web search and related capabilities (fetching, crawling, connectors, and provider integrations). If Composio is available, prefer routing requests through it so the agent can access unified features (Tavily, site connectors, etc.).
+Use for REST APIs that don't have a Composio integration.
 
-   - If a Composio call fails or does not expose a required capability, fall back to provider-specific clients in this order: HyperBrowser, Firecrawl, then native Tavily (if available).
-   - If `HYPERBROWSER_API_KEY` is present and its client library is importable, call the HyperBrowser search tool.
-   - If `FIRECRAWL_API_KEY` is present and `firecrawl` client is importable, call Firecrawl.
+---
 
-4. No-code setup
+## Provider availability
 
-   - If an agent/skill already calls the generic `web_search` or `searchonline` tool, and the provider packages + env keys are present, the runtime will route calls to the available provider automatically. No code change required.
+| Provider | Env var needed | Auto-loaded |
+|----------|---------------|-------------|
+| Tavily | `TAVILY_API_KEY` | Yes — via `web_search` tool |
+| HyperBrowser | `HYPERBROWSER_API_KEY` | Yes — auto-fallback in `web_search` for site-scoped |
+| Firecrawl | `FIRECRAWL_API_KEY` | No — use via Python if needed |
+| Playwright/Chromium | None (pre-installed) | Via `browser-use` skill |
 
-5. When to add code
+---
 
-   - Add an explicit provider adapter only if you need provider-specific features (e.g., advanced crawling controls or rate limits). Otherwise rely on the runtime's generic `searchonline`/`web_search` tool.
+## For deep browser automation (not just search)
 
-6. Safety and rate limits
+If you need to interact with a website (click, fill forms, navigate), use the **`browser-use`** skill instead. Playwright + Chromium are pre-installed in the container.
 
-   - Keep searches small (3-5 per subagent) to avoid costs and rate-limits.
+---
 
-7. Validation
+## Rate limits
 
-   - Use the included quick validation script to confirm packages and keys are visible to the running Python environment.
-
-If you want, I can also add an example `skill` that calls `searchonline` directly (non-subagent), or wire provider-specific adapters. Which would you prefer?
+Keep searches to 3-5 per task to avoid costs. Spawn a subagent for research-heavy tasks.

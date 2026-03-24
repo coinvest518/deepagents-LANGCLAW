@@ -4,12 +4,8 @@ Instead of registering 48+ individual LangChain tools (which overwhelms the
 LLM's tool-selection), we expose ONE tool: composio_action().
 
 The agent learns which action names exist by reading the composio SKILL.md.
-Entity routing (primary vs default) is handled automatically based on the
-action prefix.
-
-Supported toolkit prefixes → entity mapping:
-  slack, notion, dropbox  → default entity
-  everything else         → primary entity
+Account routing (connected_account_id) is handled automatically based on the
+action prefix, using the composio_router table.
 """
 from __future__ import annotations
 
@@ -22,15 +18,24 @@ from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
 
-# Toolkits that live under the "default" entity (not the primary pg-test- entity)
-_DEFAULT_ENTITY_TOOLKITS = frozenset({"slack", "notion", "dropbox"})
+# Special prefix mapping: GOOGLESHEETS uses the Drive account (not sheets-native)
+_PREFIX_OVERRIDE: dict[str, str] = {
+    "googlesheets": "googledrive",
+}
 
 
-def _get_entity_id(action: str) -> str:
-    """Return the correct entity_id for an action based on its toolkit prefix."""
-    from deepagents_cli.composio_router import _ENTITY_DEFAULT, _ENTITY_PRIMARY
-    prefix = action.split("_", maxsplit=1)[0].lower()
-    return _ENTITY_DEFAULT if prefix in _DEFAULT_ENTITY_TOOLKITS else _ENTITY_PRIMARY
+def _get_account_id(action: str) -> str | None:
+    """Return the connected_account_id for an action based on its toolkit prefix.
+
+    Returns None if the toolkit is unknown (caller should skip connected_account_id).
+    """
+    raw_prefix = action.split("_", maxsplit=1)[0].lower()
+    toolkit = _PREFIX_OVERRIDE.get(raw_prefix, raw_prefix)
+    try:
+        from deepagents_cli.composio_router import get_account
+        return get_account(toolkit)["account_id"]
+    except (KeyError, ValueError):
+        return None
 
 
 @tool
@@ -70,20 +75,21 @@ def composio_action(action: str, arguments: dict[str, Any] | None = None) -> str
     if not api_key:
         return "ERROR: COMPOSIO_API_KEY not set in environment"
 
-    entity_id = _get_entity_id(action)
+    account_id = _get_account_id(action)
 
     try:
         from composio import Composio  # type: ignore[import-untyped]
         client = Composio(api_key=api_key)
-        result = client.tools.execute(
-            action,
-            arguments=arguments,
-            entity_id=entity_id,
-        )
-        # Normalise result to a clean string
+        kwargs: dict[str, Any] = {
+            "dangerously_skip_version_check": True,
+        }
+        if account_id:
+            kwargs["connected_account_id"] = account_id
+        result = client.tools.execute(action, arguments=arguments, **kwargs)
+        # Normalise result to a clean string — truncate large payloads
         if isinstance(result, dict):
-            return json.dumps(result, indent=2, default=str)
-        return str(result)
+            return json.dumps(result, indent=2, default=str)[:4000]
+        return str(result)[:4000]
     except Exception as exc:  # noqa: BLE001
         logger.warning("composio_action failed: %s %s — %s", action, arguments, exc)
         return f"ERROR: {exc}"

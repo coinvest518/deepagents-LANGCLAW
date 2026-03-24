@@ -109,9 +109,20 @@ def web_search(  # noqa: ANN201 - Tavily-first web search adapter
     *,
     fallback_to_hyperbrowser: bool = True,
 ):
-    """Simplified web search that uses the Tavily provider wrapper exclusively.
+    """Search the EXTERNAL internet for current prices, news, trends, public info.
 
-    Returns a normalized dict with `results` and `query`, or an `error` key.
+    Use for: real-time prices, news, public company/person info, external research.
+    Do NOT use for: connected integrations, AstraDB queries, Gmail/GitHub/Drive
+    or social media (use composio_action for those), or internal system questions.
+
+    Args:
+        query: Search query. Supports site:domain.com to scope to a specific site.
+        max_results: Number of results to return (default 5).
+        topic: Search category — "general", "news", or "finance".
+        include_raw_content: Include raw page content in results.
+
+    Returns:
+        Dict with `results` list and `query`, or `error` key on failure.
     """
     import re
 
