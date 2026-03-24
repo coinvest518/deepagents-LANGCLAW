@@ -175,7 +175,7 @@ name = "deepagents-server-runtime"
 version = "0.0.1"
 requires-python = ">=3.11"
 dependencies = [
-    "deepagents-cli @ file://{cli_dir}",
+    "deepagents-cli[nvidia,ollama,openai,mistralai,anthropic,huggingface,cerebras] @ file://{cli_dir}",
 ]
 
 [build-system]
