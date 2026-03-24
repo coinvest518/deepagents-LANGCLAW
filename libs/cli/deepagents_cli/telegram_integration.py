@@ -242,6 +242,66 @@ class TelegramIntegration:
         else:
             return True
 
+    def send_question_with_keyboard(  # noqa: PLR6301
+        self,
+        chat_id: int,
+        text: str,
+        choices: list[str] | None = None,
+    ) -> int | None:
+        """Send a question message with optional inline keyboard buttons.
+
+        Used for ask_user interrupts from the agent.  Each choice becomes its
+        own button row.  Returns the Telegram message_id or ``None`` on failure.
+
+        Args:
+            chat_id: Destination chat ID.
+            text: HTML-formatted question text.
+            choices: Optional list of button labels (each is also the callback data).
+
+        Returns:
+            message_id of the sent message, or ``None`` on failure.
+        """
+        if not BOT_TOKEN:
+            return None
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+        }
+        if choices:
+            payload["reply_markup"] = {
+                "inline_keyboard": [[{"text": c, "callback_data": c[:64]}] for c in choices]
+            }
+        try:
+            resp = requests.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10)
+            resp.raise_for_status()
+            return resp.json().get("result", {}).get("message_id")
+        except Exception:
+            logger.warning(
+                "send_question_with_keyboard failed for chat_id=%d", chat_id, exc_info=True
+            )
+            return None
+
+    def answer_callback_query(self, query_id: str, text: str = "") -> None:  # noqa: PLR6301
+        """Answer a callback query to dismiss the loading indicator on an inline button.
+
+        Must be called within 10 seconds of receiving the callback_query update.
+
+        Args:
+            query_id: The ``id`` field from the callback_query update.
+            text: Optional short notification to show the user (up to 200 chars).
+        """
+        if not BOT_TOKEN:
+            return
+        try:
+            requests.post(
+                f"{BASE_URL}/answerCallbackQuery",
+                json={"callback_query_id": query_id, "text": text},
+                timeout=5,
+            )
+        except Exception:
+            logger.debug("answerCallbackQuery failed for query_id=%s", query_id, exc_info=True)
+
     # ------------------------------------------------------------------
     # Markdown → Telegram HTML conversion
     # ------------------------------------------------------------------

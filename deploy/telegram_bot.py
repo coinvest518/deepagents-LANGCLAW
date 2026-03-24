@@ -421,29 +421,30 @@ def _status_from_message_chunk(msg: object) -> str:
 
 async def _run_agent(
     agent: object,
-    message: str,
+    agent_input: object,
     thread_id: str,
     progress_cb: object = None,
-) -> str:
-    """Run the agent for *message* and return the complete text response.
+) -> tuple[str, list]:
+    """Run the agent for *agent_input* and return ``(response_text, interrupts)``.
 
-    Drains astream with default params (no subgraphs=True) so the agent
-    runs to completion including all tool calls, then reads the final state.
-    Using subgraphs=True caused ClosedResourceError on the server when tools
-    ran inside subgraphs — removed it to fix that.
+    *agent_input* is either:
+    - ``{"messages": [{"role": "user", "content": "..."}]}`` for a new turn
+    - A ``Command(resume={interrupt_id: answer})`` to continue after a pause
 
-    progress_cb: optional async callable(status: str) — called with a short
-    status string each time a meaningful step is detected.
-    Rate-limited to at most once per 0.5 seconds; heartbeat fires "🤔 Thinking…"
-    every 4 seconds if no other status is produced.
+    *interrupts* is ``[]`` on normal completion, or a list of LangGraph
+    ``Interrupt`` objects if the agent paused waiting for user input (ask_user).
+
+    progress_cb: optional async callable(status: str) — called each time a
+    meaningful step is detected, rate-limited to once per second.
+    Heartbeat fires "🤔 Thinking…" every 4 seconds if nothing else fires.
     """
     import time as _time
     config: dict = {"configurable": {"thread_id": thread_id}}
     try:
         _last_progress = 0.0
         _last_heartbeat = _time.monotonic()
-        _MIN_INTERVAL = 0.5    # minimum seconds between any two progress edits
-        _HEARTBEAT_EVERY = 4.0 # show "thinking" if silent for this long
+        _MIN_INTERVAL = 1.0    # minimum seconds between any two progress edits
+        _HEARTBEAT_EVERY = 4.0
 
         async def _maybe_update(status: str) -> None:
             nonlocal _last_progress, _last_heartbeat
@@ -459,30 +460,42 @@ async def _run_agent(
             except Exception:
                 pass
 
+        detected_interrupts: list = []
+
         # Drain the stream — runs agent + tools to completion.
         # RemoteAgent.astream yields 3-tuples: (namespace, mode, data)
-        async for chunk in agent.astream(  # type: ignore[union-attr]
-            {"messages": [{"role": "user", "content": message}]},
-            config=config,
-        ):
-            if progress_cb is not None:
-                # Unpack the 3-tuple that RemoteAgent yields
-                if isinstance(chunk, tuple) and len(chunk) == 3:
-                    _ns, mode, data = chunk
-                    if mode == "updates" and isinstance(data, dict):
+        async for chunk in agent.astream(agent_input, config=config):  # type: ignore[union-attr]
+            # Unpack the 3-tuple that RemoteAgent yields
+            if isinstance(chunk, tuple) and len(chunk) == 3:
+                _ns, mode, data = chunk
+                if mode == "updates" and isinstance(data, dict):
+                    # Detect LangGraph ask_user interrupt
+                    if "__interrupt__" in data:
+                        intr_list = data["__interrupt__"]
+                        if intr_list:
+                            detected_interrupts.extend(intr_list)
+                            break
+                    if progress_cb is not None:
                         status = _status_from_update(data)
                         await _maybe_update(status)
-                    elif mode == "messages":
-                        msg = data[0] if isinstance(data, tuple) else data
-                        status = _status_from_message_chunk(msg)
-                        await _maybe_update(status)
-                else:
-                    # Fallback: legacy dict chunk (shouldn't happen but keep safe)
-                    if isinstance(chunk, dict):
+                elif mode == "messages" and progress_cb is not None:
+                    msg = data[0] if isinstance(data, tuple) else data
+                    status = _status_from_message_chunk(msg)
+                    await _maybe_update(status)
+            else:
+                # Fallback: legacy dict chunk
+                if isinstance(chunk, dict):
+                    if "__interrupt__" in chunk:
+                        intr_list = chunk["__interrupt__"]
+                        if intr_list:
+                            detected_interrupts.extend(intr_list)
+                            break
+                    if progress_cb is not None:
                         status = _status_from_update(chunk)
                         await _maybe_update(status)
 
-                # Heartbeat: if silent too long, show "thinking"
+            # Heartbeat: if silent too long, show "thinking"
+            if progress_cb is not None:
                 now = _time.monotonic()
                 if now - _last_heartbeat >= _HEARTBEAT_EVERY:
                     _last_heartbeat = now
@@ -491,10 +504,13 @@ async def _run_agent(
                     except Exception:
                         pass
 
+        if detected_interrupts:
+            return "", detected_interrupts
+
         # Read the final state for the response text.
         state = await agent.aget_state(config)  # type: ignore[union-attr]
         if state is None:
-            return "No response received."
+            return "No response received.", []
         messages = getattr(state, "values", {}).get("messages", [])
 
         # Record token usage so the router can track budget consumption
@@ -510,13 +526,13 @@ async def _run_agent(
         for msg in reversed(messages):
             text = _text_from_message(msg)
             if text.strip():
-                return text.strip()
+                return text.strip(), []
 
-        return "No response received."
+        return "No response received.", []
 
     except Exception:
         logger.exception("Agent error (thread=%s)", thread_id)
-        return "Sorry, I encountered an error — please try again."
+        return "Sorry, I encountered an error — please try again.", []
 
 
 # ---------------------------------------------------------------------------
@@ -827,6 +843,9 @@ class HeadlessApp:
         self._modes: dict[int, str] = {}
         # Per-chat pending mode confirmation: chat_id → mode name awaiting /yes
         self._pending_mode: dict[int, str] = {}
+        # Per-chat pending interrupt: chat_id → Future resolved when user answers
+        # an ask_user question from the agent.
+        self._pending_interrupts: dict[int, asyncio.Future] = {}
 
     def _get_thread_id(self, chat_id: int) -> str:
         if chat_id not in self._threads:
@@ -903,6 +922,65 @@ class HeadlessApp:
             f"Reply <code>/yes</code> to confirm or <code>/no</code> to cancel."
         )
 
+    async def _ask_user_in_telegram(
+        self,
+        ask_request: dict,
+        chat_id: int,
+    ) -> dict:
+        """Send an ask_user question to Telegram and wait for the user's answer.
+
+        Sends an inline keyboard for multiple_choice questions, plain text for
+        free-form.  Resolves when the user replies or clicks a button (or times
+        out after 5 minutes).
+
+        Returns a resume payload dict: ``{"status": "answered", "answers": [...]}``.
+        """
+        questions: list = ask_request.get("questions", [])
+        if not questions:
+            return {"status": "cancelled"}
+
+        q = questions[0]
+        question_text = q.get("question", "?")
+        q_type = q.get("type", "text")
+        raw_choices = q.get("choices", [])
+
+        html = f"❓ <b>Agent needs your input:</b>\n\n<i>{question_text}</i>"
+        if len(questions) > 1:
+            html += f"\n\n<i>({len(questions) - 1} follow-up question(s) after this)</i>"
+
+        if q_type == "multiple_choice" and raw_choices:
+            choice_labels = [
+                c.get("value", str(c)) if isinstance(c, dict) else str(c)
+                for c in raw_choices
+            ]
+            html += "\n\n<i>Tap a button or type your own answer:</i>"
+            await asyncio.to_thread(
+                self._tg.send_question_with_keyboard, chat_id, html, choice_labels
+            )
+        else:
+            html += "\n\n<i>Type your answer and send it:</i>"
+            await asyncio.to_thread(self._tg.send_message_html, chat_id, html)
+
+        # Register future — resolved by next message or callback_query from this chat
+        loop = asyncio.get_running_loop()
+        answer_future: asyncio.Future = loop.create_future()
+        self._pending_interrupts[chat_id] = answer_future
+
+        try:
+            answer_text = await asyncio.wait_for(asyncio.shield(answer_future), timeout=300.0)
+        except asyncio.TimeoutError:
+            self._pending_interrupts.pop(chat_id, None)
+            await asyncio.to_thread(
+                self._tg.send_message_html,
+                chat_id,
+                "⏱️ <i>No answer received — continuing without input.</i>",
+            )
+            return {"status": "cancelled"}
+
+        # Build answers list: first answer covers Q1, rest "(not answered)"
+        answers = [answer_text] + ["(not answered)" for _ in questions[1:]]
+        return {"status": "answered", "answers": answers}
+
     async def _handle_external_message(
         self,
         message: str,
@@ -911,14 +989,25 @@ class HeadlessApp:
     ) -> None:
         """Process one Telegram message through the agent and reply.
 
-        Uses a per-chat lock so that if two messages arrive quickly, the second
-        waits rather than starting a concurrent stream to the same thread — which
-        causes ClosedResourceError on the langgraph server.
+        Interrupt-aware: if the agent pauses with an ask_user question, the
+        question is sent to Telegram and the agent resumes once the user replies.
+        The per-chat lock is held across the full turn (including any interrupt
+        round-trips) but the pending-interrupt check runs *before* the lock so
+        incoming answers can resolve the waiting future without deadlocking.
         """
         if telegram_chat_id is None:
             return
 
-        # Handle /mode commands without going to the agent
+        # ── Answer to a pending ask_user interrupt ──────────────────────────
+        # Must run BEFORE acquiring the lock — the lock is held while waiting
+        # for this future, so checking here avoids a deadlock.
+        if telegram_chat_id in self._pending_interrupts:
+            future = self._pending_interrupts.pop(telegram_chat_id)
+            if not future.done():
+                future.set_result(message)
+            return
+
+        # ── /mode commands ───────────────────────────────────────────────────
         mode_reply = self._handle_mode_command(message, telegram_chat_id)
         if mode_reply is not None:
             self._tg.send_message_html(telegram_chat_id, mode_reply)
@@ -935,39 +1024,56 @@ class HeadlessApp:
                 telegram_chat_id, thread_id, active_mode, message,
             )
 
-            # Inject active mode context into the message before sending to agent
             agent_message = _inject_mode_context(message, active_mode)
 
-            # Show typing + placeholder immediately.
+            # Show typing indicator + placeholder message immediately
             await self._tg._start_thinking(telegram_chat_id)
 
-            # Build a live-progress callback that edits the placeholder message.
-            _last_status: list[str] = [""]
+            # ── Step-log progress callback ───────────────────────────────────
+            # Each meaningful step is appended to a running log that is edited
+            # into the placeholder message so the user sees the work building up.
+            import time as _time
+            _steps: list[str] = []
+            _MAX_STEPS = 8
+            _last_edit = 0.0
+            _last_heartbeat = _time.monotonic()
+            _MIN_EDIT_INTERVAL = 1.0   # Telegram rate limit: ~1 edit/s per message
+            _HEARTBEAT_EVERY = 4.0
 
             async def _progress(status: str) -> None:
-                if status == _last_status[0]:
+                nonlocal _last_edit, _last_heartbeat
+                if not status:
                     return
-                _last_status[0] = status
+                now = _time.monotonic()
+                _last_heartbeat = now
+                if now - _last_edit < _MIN_EDIT_INTERVAL:
+                    return
+                _last_edit = now
+                # Append step only when it differs from the last one
+                if not _steps or _steps[-1] != status:
+                    _steps.append(status)
+                    if len(_steps) > _MAX_STEPS:
+                        _steps.pop(0)
                 mid = self._tg._pending_placeholders.get(telegram_chat_id)
                 if not mid:
                     return
+                log_lines = "\n".join(f"<code>{s}</code>" for s in _steps)
                 try:
                     await asyncio.to_thread(
                         self._tg.edit_message,
                         telegram_chat_id,
                         mid,
-                        f"⏳ <i>{status}</i>",
+                        f"⏳ <b>Working…</b>\n\n{log_lines}",
                     )
                 except Exception:
                     pass
 
-            # Show mode badge in status if non-default
+            # Seed the log with the active mode badge (if any)
             if active_mode != "default":
                 emoji, _ = _MODE_REGISTRY.get(active_mode, ("🎭", active_mode))
-                await _progress(f"{emoji} {active_mode.title()} mode active…")
+                await _progress(f"{emoji} {active_mode.title()} mode active")
 
-            # Musa routing: ask Musa first unless message clearly needs full agent.
-            # Skip Musa if a non-default mode is active (always use full agent for modes).
+            # ── Musa quick-chat routing ──────────────────────────────────────
             if active_mode == "default" and not _needs_full_agent(message) and CHAT_MODEL != MODEL:
                 logger.info("Musa routing (model=%s): %.60s", CHAT_MODEL, message)
                 await _progress("💬 Musa (quick-chat)…")
@@ -979,15 +1085,44 @@ class HeadlessApp:
                 logger.info("Musa HANDOFF → full agent for chat_id=%d", telegram_chat_id)
                 await _progress("🔄 Escalating to full agent…")
             else:
-                await _progress("🤖 Full agent starting…")
+                await _progress("🤖 Starting…")
 
-            # Full agent path: tasks, tool calls, anything non-trivial.
-            response = await _run_agent(
-                self._agent, agent_message, thread_id, progress_cb=_progress,
+            # ── Full agent run with interrupt loop ───────────────────────────
+            from langgraph.types import Command as _LGCommand  # noqa: PLC0415
+
+            agent_input: object = {"messages": [{"role": "user", "content": agent_message}]}
+            response, interrupts = await _run_agent(
+                self._agent, agent_input, thread_id, progress_cb=_progress,
             )
 
-        # Deliver outside the lock so the next message can start processing
-        # while we're waiting for Telegram's API to accept the reply.
+            _MAX_INTERRUPT_ROUNDS = 10
+            for _round in range(_MAX_INTERRUPT_ROUNDS):
+                if not interrupts:
+                    break
+                resume_data: dict = {}
+                for intr in interrupts:
+                    intr_value = getattr(intr, "value", None)
+                    intr_id = getattr(intr, "id", f"intr_{_round}")
+                    if isinstance(intr_value, dict) and intr_value.get("type") == "ask_user":
+                        await _progress("❓ Waiting for your answer…")
+                        answer = await self._ask_user_in_telegram(intr_value, telegram_chat_id)
+                        resume_data[intr_id] = answer
+                    else:
+                        logger.warning(
+                            "Unhandled interrupt type (chat_id=%d): %r",
+                            telegram_chat_id, intr_value,
+                        )
+                        resume_data[intr_id] = {"status": "cancelled"}
+
+                await _progress("🔄 Resuming…")
+                response, interrupts = await _run_agent(
+                    self._agent,
+                    _LGCommand(resume=resume_data),
+                    thread_id,
+                    progress_cb=_progress,
+                )
+
+        # Deliver outside the lock
         logger.info("Agent reply to chat_id=%d: %.80s", telegram_chat_id, response)
         self._tg.deliver_reply(telegram_chat_id, response)
 
@@ -1033,6 +1168,30 @@ class HeadlessBot:
 
         self._tg = tg
         self._app = app
+
+    async def _handle_callback_query(self, query: dict) -> None:
+        """Handle an inline keyboard button press (callback_query update).
+
+        If the originating chat has a pending ask_user interrupt, resolves the
+        waiting Future with the button's callback_data so the agent can resume.
+        Always answers the callback query to dismiss Telegram's loading spinner.
+        """
+        query_id: str = query.get("id", "")
+        data: str = query.get("data", "")
+        chat_id: int | None = (
+            query.get("message", {}).get("chat", {}).get("id")
+        )
+
+        # Dismiss the loading spinner on the button immediately
+        await asyncio.to_thread(self._tg.answer_callback_query, query_id)
+
+        if chat_id and chat_id in self._app._pending_interrupts:
+            future = self._app._pending_interrupts.pop(chat_id)
+            if not future.done():
+                future.set_result(data)
+                logger.info(
+                    "Callback answer for chat_id=%d: %r", chat_id, data[:60]
+                )
 
     async def _handle_voice(self, msg: dict, chat_id: int) -> None:
         """Transcribe a Telegram voice message and run it through the agent.
@@ -1094,7 +1253,8 @@ class HeadlessBot:
             self._app._locks[chat_id] = asyncio.Lock()
 
         async with self._app._locks[chat_id]:
-            response = await _run_agent(self._app._agent, text, thread_id)
+            agent_input = {"messages": [{"role": "user", "content": text}]}
+            response, _ = await _run_agent(self._app._agent, agent_input, thread_id)
 
         # Reply with voice if quota allows, otherwise text only
         if tts_available() and len(response) <= int(os.environ.get("DA_TTS_MAX_CHARS", "400")):
@@ -1177,7 +1337,10 @@ class HeadlessBot:
 
         while True:
             try:
-                params: dict = {"timeout": 55, "allowed_updates": ["message"]}
+                params: dict = {
+                    "timeout": 55,
+                    "allowed_updates": ["message", "callback_query"],
+                }
                 if self._tg.offset is not None:
                     params["offset"] = self._tg.offset
 
@@ -1186,8 +1349,11 @@ class HeadlessBot:
                 for update in data.get("result", []):
                     self._tg.offset = update["update_id"] + 1
                     try:
-                        # Intercept /reset before forwarding to handle_telegram_update
-                        # so we can clear the thread_id in HeadlessApp.
+                        # ── Inline keyboard button press ─────────────────────
+                        if "callback_query" in update:
+                            await self._handle_callback_query(update["callback_query"])
+                            continue
+
                         msg = update.get("message", {})
                         raw_text: str = msg.get("text", "").strip()
                         chat_id: int | None = msg.get("chat", {}).get("id")
