@@ -22,7 +22,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
 
-from deepagents._models import resolve_model
+from deepagents._models import model_matches_spec, resolve_model
 from deepagents.backends import StateBackend
 from deepagents.backends.protocol import BackendFactory, BackendProtocol
 from deepagents.middleware.async_subagents import AsyncSubAgent, AsyncSubAgentMiddleware
@@ -69,14 +69,38 @@ Keep working until the task is fully complete. Don't stop partway and explain wh
 - Once a tool returns data, present it to the user. Do NOT call the same tool again unless the user asks for different data.
 - Never call the same tool with the same arguments more than once — you already have the result.
 - If the data is incomplete or truncated, work with what you have. Do not retry.
+- If data came from the wrong source (wrong folder, wrong filter), change the parameters — don't repeat the same call.
 
 **When things go wrong:**
 - If something fails repeatedly, stop and analyze *why* — don't keep retrying the same approach.
+- If the user says "no, try X instead" or "check a different Y", you MUST change your approach. Do not repeat the action you just tried.
+- Track what you've already tried. Never repeat a failed or rejected approach.
 - If you're blocked, tell the user what's wrong and ask for guidance.
+
+**Memory and context:**
+- Use `search_memory` to recall facts from past conversations before starting a task.
+- Use `save_memory` to store important facts, user preferences, and task outcomes for future reference.
+- When a task completes or the user teaches you something, save it to memory so you don't repeat mistakes.
 
 ## Progress Updates
 
 For longer tasks, provide brief progress updates at reasonable intervals — a concise sentence recapping what you've done and what's next."""  # noqa: E501
+
+
+def _all_available_specs() -> list[tuple[str, str]]:
+    """Return (env_var, model_spec) pairs for every provider with a key present.
+
+    Order matters: subagent rotation picks from this list.  Best tool-callers
+    first so subagents get the strongest models for their tasks.
+    """
+    _ALL_SPECS: list[tuple[str, str]] = [
+        ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),     # 400k TPM, primary for all
+        ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),                 # 600k TPM, very fast
+        ("OPENROUTER_API_KEY",       "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"),
+        ("HUGGINGFACEHUB_API_TOKEN", "huggingface:Qwen/Qwen2.5-72B-Instruct"),
+        ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),          # 50k TPM — too small for main, last resort
+    ]
+    return [(ev, spec) for ev, spec in _ALL_SPECS if os.environ.get(ev)]
 
 
 def _attach_fallbacks(model: BaseChatModel) -> BaseChatModel:
@@ -85,25 +109,13 @@ def _attach_fallbacks(model: BaseChatModel) -> BaseChatModel:
     Resolves all available providers (from env keys) except the one already
     selected, and attaches them as fallbacks via ``with_fallbacks()``.
     """
-    import os
     import logging as _logging
     _logger = _logging.getLogger(__name__)
 
-    _ALL_SPECS: list[tuple[str, str]] = [
-        ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),
-        ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),
-        ("OPENROUTER_API_KEY",       "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"),
-        ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),
-        ("HUGGINGFACEHUB_API_TOKEN", "huggingface:Qwen/Qwen2.5-72B-Instruct"),
-    ]
-
     fallbacks: list[BaseChatModel] = []
-    for env_var, spec in _ALL_SPECS:
-        if not os.environ.get(env_var):
-            continue
+    for _env_var, spec in _all_available_specs():
         try:
             candidate = resolve_model(spec)
-            # Skip if this is the same model as primary
             if model_matches_spec(model, spec):
                 continue
             fallbacks.append(candidate)
@@ -116,30 +128,60 @@ def _attach_fallbacks(model: BaseChatModel) -> BaseChatModel:
     return model
 
 
-def get_default_model() -> BaseChatModel:
-    """Get the default model for deep agents.
+def _pick_subagent_model(main_model: BaseChatModel, index: int) -> BaseChatModel:
+    """Pick a model for subagent *index* that uses a DIFFERENT provider than main.
 
-    Auto-detects the best available model ranked by **tool-calling reliability**,
-    not just quota size.  Models that reliably follow tool schemas and know when
-    to stop calling tools are prioritised over high-quota but weaker models.
+    Rotates through available providers so subagents spread across different
+    rate-limit buckets instead of all hammering the same provider as main.
+    """
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
+
+    available = _all_available_specs()
+    if len(available) <= 1:
+        return main_model  # only one provider, nothing to rotate
+
+    # Filter out the main model's provider
+    others = [(ev, spec) for ev, spec in available if not model_matches_spec(main_model, spec)]
+    if not others:
+        others = available  # all same provider somehow, just use them
+
+    # Round-robin across non-main providers
+    _, spec = others[index % len(others)]
+    try:
+        sub_model = resolve_model(spec)
+        _logger.info("Subagent[%d] using %s (different provider from main)", index, spec)
+        return sub_model
+    except Exception:
+        _logger.warning("Subagent[%d] failed to resolve %s, using main model", index, spec)
+        return main_model
+
+
+def get_default_model() -> BaseChatModel:
+    """Get the default model for the main agent.
+
+    Picks the best model for the **main agent** — prioritised by quota size
+    (larger TPM = less rate limiting during multi-tool runs) balanced against
+    tool-calling quality.  Direct-API providers before free-tier proxies.
+
+    NVIDIA (400k TPM) is preferred over Mistral (50k TPM) as main agent
+    because the main agent makes the most calls.  Mistral is better used
+    for subagents where its strong tool-calling shines on fewer calls.
 
     Returns:
         A `BaseChatModel` instance.
     """
-    import os
-
-    # Priority: reliable direct-API providers first (own rate limits),
-    # then free-tier proxies (shared rate limits, can 429 easily).
     # fmt: off
+    # Priority for MAIN agent: highest quota + direct API first
     _CANDIDATES: list[tuple[str, str]] = [
-        # (env_var,                   model_spec)
-        # --- Direct API keys = own rate limit, most reliable ---
-        ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),               # good native tool calling, 50k TPM
-        ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),           # decent tools, 400k TPM free
-        # --- Free-tier proxies (shared rate limits, can 429) ---
+        # --- Direct API, high quota — best for main agent ---
+        ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),           # 400k TPM free
+        ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),                       # 600k TPM, fast
+        # --- Free-tier proxies ---
         ("OPENROUTER_API_KEY",       "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"),
-        ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),                       # fast, moderate tool calling
         ("HUGGINGFACEHUB_API_TOKEN", "huggingface:Qwen/Qwen2.5-72B-Instruct"),       # fallback
+        # --- Direct API, small quota — avoid for main agent ---
+        ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),               # 50k TPM too small for main
         # --- Direct premium keys (if added later) ---
         ("ANTHROPIC_API_KEY",        "anthropic:claude-sonnet-4-6"),
         ("OPENAI_API_KEY",           "openai:gpt-4o"),
@@ -161,13 +203,11 @@ def get_default_model() -> BaseChatModel:
 
     if not available:
         msg = (
-            "No LLM API key found. Set one of: MISTRAL_API_KEY, NVIDIA_API_KEY, "
+            "No LLM API key found. Set one of: NVIDIA_API_KEY, MISTRAL_API_KEY, "
             "OPENROUTER_API_KEY, CEREBRAS_API_KEY, HUGGINGFACEHUB_API_TOKEN."
         )
         raise RuntimeError(msg)
 
-    # Return the first available BaseChatModel.  Fallbacks are attached
-    # later by _attach_fallbacks() inside create_deep_agent().
     return available[0]
 
 
@@ -306,9 +346,8 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
     if interrupt_on is not None:
         gp_middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))
 
-    # Worker subagent can use a stronger model than the coordinator.
-    # Set DA_SUBAGENT_MODEL env var to override (e.g. mistral-large while
-    # coordinator runs mistral-small).  Defaults to same model as coordinator.
+    # Worker subagent uses a DIFFERENT provider than main to avoid rate-limit
+    # competition.  DA_SUBAGENT_MODEL env var can force a specific model.
     _subagent_model_spec = os.environ.get("DA_SUBAGENT_MODEL", "").strip()
     if _subagent_model_spec:
         try:
@@ -316,12 +355,13 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
         except Exception:
             import logging as _log
             _log.getLogger(__name__).warning(
-                "DA_SUBAGENT_MODEL '%s' failed to resolve, falling back to main model",
+                "DA_SUBAGENT_MODEL '%s' failed to resolve, using different provider",
                 _subagent_model_spec,
             )
-            worker_model = model
+            worker_model = _pick_subagent_model(model, index=0)
     else:
-        worker_model = model
+        # Auto-pick a different provider so subagent doesn't compete with main
+        worker_model = _pick_subagent_model(model, index=0)
 
     general_purpose_spec: SubAgent = {  # ty: ignore[missing-typed-dict-key]
         **GENERAL_PURPOSE_SUBAGENT,
@@ -332,22 +372,27 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
 
     # Process user-provided subagents to fill in defaults for model, tools, and middleware
     processed_subagents: list[SubAgent | CompiledSubAgent] = []
+    _subagent_idx = 1  # 0 is general-purpose, start custom subagents at 1
     for spec in subagents or []:
         if "runnable" in spec:
             # CompiledSubAgent - use as-is
             processed_subagents.append(spec)
         else:
             # SubAgent - fill in defaults and prepend base middleware
-            subagent_model = spec.get("model", model)
-            try:
-                subagent_model = resolve_model(subagent_model)
-            except Exception:
-                import logging as _log
-                _log.getLogger(__name__).warning(
-                    "Subagent '%s' model failed to resolve, using main model",
-                    spec.get("name", "unknown"),
-                )
-                subagent_model = model
+            if spec.get("model"):
+                try:
+                    subagent_model = resolve_model(spec["model"])
+                except Exception:
+                    import logging as _log
+                    _log.getLogger(__name__).warning(
+                        "Subagent '%s' model failed to resolve, auto-picking provider",
+                        spec.get("name", "unknown"),
+                    )
+                    subagent_model = _pick_subagent_model(model, index=_subagent_idx)
+            else:
+                # No explicit model — auto-pick a different provider
+                subagent_model = _pick_subagent_model(model, index=_subagent_idx)
+            _subagent_idx += 1
 
             # Build middleware: base stack + skills (if specified) + user's middleware
             subagent_middleware: list[AgentMiddleware[Any, Any, Any]] = [

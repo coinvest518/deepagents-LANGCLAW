@@ -24,6 +24,67 @@ _PREFIX_OVERRIDE: dict[str, str] = {
 }
 
 
+def _smart_truncate(data: dict | str, max_chars: int = 6000) -> str:
+    """Compress tool results intelligently instead of blind character truncation.
+
+    For dict results (JSON from APIs like Gmail):
+    - Preserves metadata fields (labels, folders, ids, subjects, senders)
+    - Strips large body/payload/content fields first
+    - Summarises list items if there are too many
+    - Always produces valid, readable output
+
+    For string results: truncates at a line boundary.
+    """
+    if isinstance(data, str):
+        if len(data) <= max_chars:
+            return data
+        # Truncate at last newline before limit
+        cut = data[:max_chars].rfind("\n")
+        if cut < max_chars // 2:
+            cut = max_chars - 200
+        return data[:cut] + f"\n\n[TRUNCATED — {len(data)} chars total. Use the data above to respond.]"
+
+    # Dict: strip heavy fields, keep metadata
+    _HEAVY_KEYS = {"body", "payload", "raw", "htmlBody", "html_body", "content",
+                   "textBody", "text_body", "snippet", "raw_content", "data",
+                   "attachments", "parts", "headers"}
+    _KEEP_KEYS = {"id", "threadId", "labelIds", "label_ids", "subject", "from",
+                  "to", "date", "snippet", "name", "email", "folder", "label",
+                  "sender", "recipient", "internalDate", "historyId"}
+
+    def _slim(obj: Any, depth: int = 0) -> Any:
+        if isinstance(obj, dict):
+            slimmed = {}
+            for k, v in obj.items():
+                if k.lower() in {hk.lower() for hk in _HEAVY_KEYS} and depth > 0:
+                    if isinstance(v, str) and len(v) > 200:
+                        slimmed[k] = v[:200] + "...[trimmed]"
+                    elif isinstance(v, (list, dict)):
+                        slimmed[k] = f"[{type(v).__name__}, {len(v)} items — trimmed]"
+                    else:
+                        slimmed[k] = v
+                else:
+                    slimmed[k] = _slim(v, depth + 1)
+            return slimmed
+        elif isinstance(obj, list):
+            if len(obj) > 5:
+                return [_slim(item, depth + 1) for item in obj[:5]] + [
+                    f"...and {len(obj) - 5} more items"
+                ]
+            return [_slim(item, depth + 1) for item in obj]
+        return obj
+
+    slimmed = _slim(data)
+    text = json.dumps(slimmed, indent=2, default=str)
+    if len(text) > max_chars:
+        # Still too big — fall back to line-boundary truncation
+        cut = text[:max_chars].rfind("\n")
+        if cut < max_chars // 2:
+            cut = max_chars - 200
+        text = text[:cut] + f"\n\n[TRUNCATED — trimmed result still too large. Use the data above to respond.]"
+    return text
+
+
 def _get_account_id(action: str) -> str | None:
     """Return the connected_account_id for an action based on its toolkit prefix.
 
@@ -96,13 +157,13 @@ def composio_action(action: str, arguments: dict[str, Any] | str | None = None) 
         if account_id:
             kwargs["connected_account_id"] = account_id
         result = client.tools.execute(action, arguments=arguments, **kwargs)
-        # Normalise result to a clean string — truncate large payloads
+        # Normalise result to a clean string — smart compression for large payloads
         if isinstance(result, dict):
             text = json.dumps(result, indent=2, default=str)
         else:
             text = str(result)
-        if len(text) > 4000:
-            text = text[:3900] + "\n\n[TRUNCATED — full result too large. Use the data above to respond to the user.]"
+        if len(text) > 6000:
+            text = _smart_truncate(result if isinstance(result, dict) else text, max_chars=6000)
         return text
     except Exception as exc:  # noqa: BLE001
         logger.warning("composio_action failed: %s %s — %s", action, arguments, exc)

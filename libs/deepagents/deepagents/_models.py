@@ -32,6 +32,17 @@ def resolve_model(model: str | BaseChatModel) -> BaseChatModel:
         from langchain_cerebras import ChatCerebras
         model_name = model.split(":", 1)[1]
         return ChatCerebras(model=model_name)
+    # HuggingFace: use Inference API (remote) not local transformers pipeline.
+    if model.startswith("huggingface:"):
+        from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+        model_name = model.split(":", 1)[1]
+        llm = HuggingFaceEndpoint(
+            repo_id=model_name,
+            task="text-generation",
+            max_new_tokens=4096,
+            do_sample=False,
+        )
+        return ChatHuggingFace(llm=llm)
     return init_chat_model(model)
 
 

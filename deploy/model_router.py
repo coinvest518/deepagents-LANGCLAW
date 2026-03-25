@@ -45,12 +45,12 @@ FREE_TIER_TPM: dict[str, int | None] = {
 # ---------------------------------------------------------------------------
 _TOOL_MODELS: list[tuple[str, str, str]] = [
     # (provider_key, model_spec,                                  display_name)
-    # Ranked by reliability: direct-API providers first (own rate limits),
-    # then free-tier proxies (shared limits, can 429 easily).
+    # Ranked for MAIN agent: highest quota first (main agent makes most calls),
+    # then direct-API, then free-tier proxies.
     #
     # --- Direct API = own rate limit, most reliable ---
-    ("mistralai",   "mistralai:mistral-large-latest",            "Mistral Large"),              # good native tools, 50k TPM
-    ("nvidia",      "nvidia:meta/llama-3.3-70b-instruct",        "NVIDIA Llama-3.3-70B"),      # 400k TPM free
+    ("nvidia",      "nvidia:meta/llama-3.3-70b-instruct",        "NVIDIA Llama-3.3-70B"),      # 400k TPM free — best for main agent
+    ("mistralai",   "mistralai:mistral-large-latest",            "Mistral Large"),              # 50k TPM — great tools, better for subagents
     #
     # --- Free-tier proxies (shared rate limits) ---
     ("openrouter",  "openrouter:mistralai/mistral-small-3.1-24b-instruct:free","OR Mistral Small 3.1"),    # can 429
