@@ -100,6 +100,79 @@ def _get_account_id(action: str) -> str | None:
 
 
 @tool
+def composio_get_schema(action: str) -> str:
+    """Get the full parameter schema for any Composio action.
+
+    Call this BEFORE using an action for the first time, or when a previous
+    call failed or returned unexpected results.  It tells you exactly what
+    arguments the action accepts, their types, defaults, and descriptions.
+
+    This is how you LEARN and SELF-CORRECT:
+    - Before calling an unfamiliar action, check its schema first.
+    - If composio_action returned an error or wrong data, call this to see
+      what parameters you should have used.
+    - Use the schema to build the correct arguments dict.
+
+    Args:
+        action: Composio action slug (e.g. "GMAIL_FETCH_EMAILS", "GITHUB_LIST_REPOSITORY_ISSUES")
+
+    Returns:
+        JSON schema showing all parameters, their types, defaults, and descriptions.
+    """
+    api_key = os.environ.get("COMPOSIO_API_KEY", "")
+    if not api_key:
+        return "ERROR: COMPOSIO_API_KEY not set"
+
+    try:
+        from composio import Composio
+        client = Composio(api_key=api_key)
+        raw = client.tools.get_raw_composio_tool_by_slug(action)
+
+        # Extract the input parameters schema
+        params = getattr(raw, 'input_parameters', None)
+        if params is None and isinstance(raw, dict):
+            params = raw.get('input_parameters', {})
+        if hasattr(params, '__dict__'):
+            params = params.__dict__
+
+        # Also get the description
+        desc = getattr(raw, 'description', '') or ''
+
+        result = {
+            "action": action,
+            "description": desc[:500],
+            "parameters": {},
+        }
+
+        if isinstance(params, dict) and 'properties' in params:
+            for name, info in params['properties'].items():
+                param_info: dict[str, Any] = {"type": info.get("type", "unknown")}
+                if "description" in info:
+                    param_info["description"] = info["description"][:200]
+                if "default" in info:
+                    param_info["default"] = info["default"]
+                if "enum" in info:
+                    param_info["enum"] = info["enum"]
+                if "items" in info:
+                    param_info["items"] = info["items"]
+                if "examples" in info:
+                    param_info["examples"] = info["examples"][:3]
+                result["parameters"][name] = param_info
+
+            required = params.get("required", [])
+            if required:
+                result["required"] = required
+
+        text = json.dumps(result, indent=2, default=str)
+        if len(text) > 6000:
+            text = _smart_truncate(result, max_chars=6000)
+        return text
+    except Exception as exc:
+        logger.warning("composio_get_schema failed: %s — %s", action, exc)
+        return f"ERROR: Could not get schema for {action}: {exc}"
+
+
+@tool
 def composio_action(action: str, arguments: dict[str, Any] | str | None = None) -> str:
     """Execute any Composio action by name.
 
@@ -167,4 +240,11 @@ def composio_action(action: str, arguments: dict[str, Any] | str | None = None) 
         return text
     except Exception as exc:  # noqa: BLE001
         logger.warning("composio_action failed: %s %s — %s", action, arguments, exc)
-        return f"ERROR: {exc}"
+        hint = (
+            f"ERROR: {exc}\n\n"
+            f"HINT: Call composio_get_schema(\"{action}\") to see the correct "
+            f"parameters for this action. Check parameter names, types, and "
+            f"required fields. If the action slug is wrong, check the relevant "
+            f"skill documentation for the correct action name."
+        )
+        return hint

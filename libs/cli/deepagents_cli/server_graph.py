@@ -81,9 +81,9 @@ def _build_tools(
     # Gracefully skipped if composio SDK is not installed or API key is absent.
     if os.environ.get("COMPOSIO_API_KEY", ""):
         try:
-            from deepagents_cli.composio_dispatcher import composio_action
-            tools.append(composio_action)
-            logger.info("Composio dispatcher tool loaded (single entry point)")
+            from deepagents_cli.composio_dispatcher import composio_action, composio_get_schema
+            tools.extend([composio_action, composio_get_schema])
+            logger.info("Composio dispatcher + schema discovery tools loaded")
         except Exception:
             logger.warning("Composio dispatcher skipped", exc_info=True)
 
