@@ -774,16 +774,9 @@ def create_cli_agent(
     # Build middleware stack based on enabled features
     agent_middleware = []
     agent_middleware.append(ConfigurableModelMiddleware())
-    # Coerce JSON-string args back to list/dict before Pydantic validation.
-    # LLMs (especially open-weight) pass structured params as serialized strings.
-    # This covers write_todos, composio_action, web_search, and others.
-    # Lazy import — skipped gracefully if the langgraph version on this host
-    # doesn't export the types patch_tool_calls depends on (Runtime, Overwrite).
-    try:
-        from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
-        agent_middleware.append(PatchToolCallsMiddleware())
-    except Exception:
-        logger.warning("PatchToolCallsMiddleware unavailable — JSON arg coercion skipped")
+    # PatchToolCallsMiddleware is NOT added here — create_deep_agent() already
+    # includes it in its standard middleware stack. Adding it here would cause
+    # a duplicate-middleware AssertionError from create_agent().
 
     # Add ask_user middleware (must be early so its tool is available)
     from deepagents_cli.ask_user import AskUserMiddleware

@@ -193,14 +193,8 @@ async def wait_for_server_healthy(
             output = read_log() if read_log else ""
             msg = f"Server process exited with code {process.returncode}"
             if output:
-                # Show first 2000 chars (captures our DEEPAGENTS STARTUP FAILURE print)
-                # AND last 2000 chars (captures the langgraph traceback)
-                head = output[:8000]
-                tail = output[-2000:] if len(output) > 8000 else ""
-                if tail and tail not in head:
-                    msg += f"\n--- LOG START ---\n{head}\n--- LOG END ---\n{tail}"
-                else:
-                    msg += f"\n{head}"
+                # Dump the full log (capped at 50k chars to avoid OOM on runaway logs)
+                msg += f"\n{output[:50000]}"
             raise RuntimeError(msg)
 
         try:

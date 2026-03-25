@@ -40,14 +40,11 @@ services:
         value: http://13.222.51.51:11434
       - key: OLLAMA_MODEL
         value: llama3.2:1b
-      # ElevenLabs configuration
-      - key: ELEVENLABS_API_KEY
-        value: sk_3fb81e5abbfa12f498acff121faf26db467951e13cf4fcf4
-      - key: ELEVEN_LABS_API_KEY
-        value: sk_3fb81e5abbfa12f498acff121faf26db467951e13cf4fcf4
+      # ElevenLabs — set these in the Render dashboard, NOT here
+      # - key: ELEVENLABS_API_KEY
+      # - key: ELEVEN_LABS_API_KEY
       - key: ELEVENLABS_MODEL
         value: eleven_turbo_v2
-      # Free female voice: Lily - Velvety Actress
       - key: ELEVENLABS_VOICE
         value: pFZP5JQG7iQjIQuC4Bku
       - key: ELEVEN_LABS_VOICE_ID

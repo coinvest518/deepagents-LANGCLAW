@@ -240,7 +240,18 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
     # Set DA_SUBAGENT_MODEL env var to override (e.g. mistral-large while
     # coordinator runs mistral-small).  Defaults to same model as coordinator.
     _subagent_model_spec = os.environ.get("DA_SUBAGENT_MODEL", "").strip()
-    worker_model = resolve_model(_subagent_model_spec) if _subagent_model_spec else model
+    if _subagent_model_spec:
+        try:
+            worker_model = resolve_model(_subagent_model_spec)
+        except Exception:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "DA_SUBAGENT_MODEL '%s' failed to resolve, falling back to main model",
+                _subagent_model_spec,
+            )
+            worker_model = model
+    else:
+        worker_model = model
 
     general_purpose_spec: SubAgent = {  # ty: ignore[missing-typed-dict-key]
         **GENERAL_PURPOSE_SUBAGENT,
@@ -258,7 +269,15 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
         else:
             # SubAgent - fill in defaults and prepend base middleware
             subagent_model = spec.get("model", model)
-            subagent_model = resolve_model(subagent_model)
+            try:
+                subagent_model = resolve_model(subagent_model)
+            except Exception:
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    "Subagent '%s' model failed to resolve, using main model",
+                    spec.get("name", "unknown"),
+                )
+                subagent_model = model
 
             # Build middleware: base stack + skills (if specified) + user's middleware
             subagent_middleware: list[AgentMiddleware[Any, Any, Any]] = [
