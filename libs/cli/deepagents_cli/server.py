@@ -270,14 +270,20 @@ def _build_server_env() -> dict[str, str]:
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["LANGGRAPH_AUTH_TYPE"] = "noop"
 
-    # Ensure the server subprocess uses our LOCAL deepagents/deepagents-cli
-    # packages (installed correctly via Docker) rather than whatever pip resolved
-    # in the langgraph dev venv. PYTHONPATH entries come before venv site-packages
-    # in sys.path, so local sources win over PyPI-installed versions.
+    # The langgraph dev venv often fails to install all provider packages
+    # (nvidia, ollama, etc.) due to pip conflicts. Bypass the venv entirely
+    # by putting our local source dirs AND the system site-packages on
+    # PYTHONPATH. Since PYTHONPATH comes before venv site-packages in sys.path,
+    # the subprocess uses the same packages the Dockerfile already installed.
+    import site
     _libs = Path(__file__).parent.parent.parent  # /app/libs
-    _local_paths = [str(_libs / "deepagents"), str(_libs / "cli")]
+    _paths = [
+        str(_libs / "deepagents"),         # local deepagents 0.5.0
+        str(_libs / "cli"),                # local deepagents-cli
+        *site.getsitepackages(),           # system site-packages (has nvidia, ollama, etc.)
+    ]
     _existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = ":".join(filter(None, _local_paths + [_existing]))
+    env["PYTHONPATH"] = ":".join(filter(None, _paths + [_existing]))
     # LangGraph SDK requires one of these keys to be set — even for a local
     # dev server — or it throws a TypeError before making any network request.
     # Use whatever the caller has; fall back to "local" so the SDK is satisfied.

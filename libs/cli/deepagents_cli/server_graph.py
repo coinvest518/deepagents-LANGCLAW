@@ -126,7 +126,23 @@ def make_graph() -> Any:  # noqa: ANN401
     if project_context is not None:
         settings.reload_from_environment(start_path=project_context.user_cwd)
 
-    result = create_model(config.model, extra_kwargs=config.model_params)
+    try:
+        result = create_model(config.model, extra_kwargs=config.model_params)
+    except Exception as model_err:
+        logger.warning(
+            "Primary model '%s' failed (%s), trying fallback providers",
+            config.model, model_err,
+        )
+        # Try common fallback providers in order of likelihood
+        for fallback in ("mistralai:mistral-large-latest", "openai:gpt-4o", "anthropic:claude-3-5-sonnet-20241022"):
+            try:
+                result = create_model(fallback, extra_kwargs=config.model_params)
+                logger.info("Fallback model '%s' loaded successfully", fallback)
+                break
+            except Exception:
+                continue
+        else:
+            raise model_err  # re-raise original if all fallbacks fail
     result.apply_to_settings()
 
     tools, mcp_server_info = _build_tools(config, project_context)
