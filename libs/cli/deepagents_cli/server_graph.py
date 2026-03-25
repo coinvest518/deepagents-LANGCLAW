@@ -8,6 +8,8 @@ The graph is created at module import time via `make_graph()`, which reads
 configuration from `ServerConfig.from_env()` — the same dataclass the CLI uses
 to *write* the configuration via `ServerConfig.to_env()`. This shared schema
 ensures the two sides stay in sync.
+
+# workspace-version: 2  (bump to force venv rebuild with updated pyproject extras)
 """
 
 from __future__ import annotations
