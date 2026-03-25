@@ -64,6 +64,17 @@ def _build_tools(
     if settings.has_tavily:
         tools.append(web_search)
 
+    # Memory tools — search_memory, save_memory, search_database, save_to_database.
+    # Gives the agent direct access to Mem0 (semantic memory) and AstraDB (structured data).
+    # Gracefully skipped if neither MEM0_API_KEY nor ASTRA_DB_API_KEY is present.
+    if os.environ.get("MEM0_API_KEY") or os.environ.get("ASTRA_DB_API_KEY"):
+        try:
+            from deepagents_cli.memory_tools import MEMORY_TOOLS
+            tools.extend(MEMORY_TOOLS)
+            logger.info("Memory tools loaded (%d tools)", len(MEMORY_TOOLS))
+        except Exception:
+            logger.warning("Memory tools skipped", exc_info=True)
+
     # Single Composio dispatcher — replaces 48+ individual LangChain tools.
     # The agent reads composio SKILL.md to know available action names, then calls
     # this one tool instead of picking from a 50-tool list.

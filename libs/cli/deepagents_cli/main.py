@@ -830,6 +830,14 @@ async def _run_acp_cli_async(
     if settings.has_tavily:
         tools.append(web_search)
 
+    # Memory tools — search_memory, save_memory, search_database, save_to_database
+    if os.environ.get("MEM0_API_KEY") or os.environ.get("ASTRA_DB_API_KEY"):
+        try:
+            from deepagents_cli.memory_tools import MEMORY_TOOLS
+            tools.extend(MEMORY_TOOLS)
+        except Exception:
+            logger.warning("Memory tools skipped", exc_info=True)
+
     mcp_session_manager = None
     mcp_server_info = None
     try:
