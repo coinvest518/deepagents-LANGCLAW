@@ -79,6 +79,43 @@ Keep working until the task is fully complete. Don't stop partway and explain wh
 For longer tasks, provide brief progress updates at reasonable intervals — a concise sentence recapping what you've done and what's next."""  # noqa: E501
 
 
+def _attach_fallbacks(model: BaseChatModel) -> BaseChatModel:
+    """Wrap *model* with fallback providers so a 429/5xx doesn't crash the run.
+
+    Resolves all available providers (from env keys) except the one already
+    selected, and attaches them as fallbacks via ``with_fallbacks()``.
+    """
+    import os
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
+
+    _ALL_SPECS: list[tuple[str, str]] = [
+        ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),
+        ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),
+        ("OPENROUTER_API_KEY",       "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"),
+        ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),
+        ("HUGGINGFACEHUB_API_TOKEN", "huggingface:Qwen/Qwen2.5-72B-Instruct"),
+    ]
+
+    fallbacks: list[BaseChatModel] = []
+    for env_var, spec in _ALL_SPECS:
+        if not os.environ.get(env_var):
+            continue
+        try:
+            candidate = resolve_model(spec)
+            # Skip if this is the same model as primary
+            if model_matches_spec(model, spec):
+                continue
+            fallbacks.append(candidate)
+        except Exception:
+            continue
+
+    if fallbacks:
+        _logger.info("Attached %d fallback model(s) to primary", len(fallbacks))
+        return model.with_fallbacks(fallbacks)  # type: ignore[return-value]
+    return model
+
+
 def get_default_model() -> BaseChatModel:
     """Get the default model for deep agents.
 
@@ -110,15 +147,35 @@ def get_default_model() -> BaseChatModel:
     ]
     # fmt: on
 
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
+
+    available: list[BaseChatModel] = []
     for env_var, spec in _CANDIDATES:
         if os.environ.get(env_var):
-            return resolve_model(spec)
+            try:
+                available.append(resolve_model(spec))
+                _logger.info("Model available: %s", spec)
+            except Exception:
+                _logger.warning("Model failed to resolve: %s", spec, exc_info=True)
 
-    msg = (
-        "No LLM API key found. Set one of: OPENROUTER_API_KEY, MISTRAL_API_KEY, "
-        "NVIDIA_API_KEY, CEREBRAS_API_KEY, HUGGINGFACEHUB_API_TOKEN."
-    )
-    raise RuntimeError(msg)
+    if not available:
+        msg = (
+            "No LLM API key found. Set one of: MISTRAL_API_KEY, NVIDIA_API_KEY, "
+            "OPENROUTER_API_KEY, CEREBRAS_API_KEY, HUGGINGFACEHUB_API_TOKEN."
+        )
+        raise RuntimeError(msg)
+
+    # Single model — return as-is.  Multiple — wrap with fallbacks so a 429
+    # or transient error on the primary automatically tries the next provider.
+    primary = available[0]
+    if len(available) > 1:
+        _logger.info(
+            "Model with %d fallback(s): primary=%s",
+            len(available) - 1, type(primary).__name__,
+        )
+        return primary.with_fallbacks(available[1:])  # type: ignore[return-value]
+    return primary
 
 
 def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic with many conditional branches
@@ -231,7 +288,13 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
     Returns:
         A configured deep agent.
     """
-    model = get_default_model() if model is None else resolve_model(model)
+    if model is None:
+        model = get_default_model()  # already has fallbacks built in
+    else:
+        model = resolve_model(model)
+        # Attach fallbacks from other available providers so a 429 on the
+        # primary doesn't kill the entire run.
+        model = _attach_fallbacks(model)
 
     backend = backend if backend is not None else (StateBackend)
 
