@@ -166,16 +166,9 @@ def get_default_model() -> BaseChatModel:
         )
         raise RuntimeError(msg)
 
-    # Single model — return as-is.  Multiple — wrap with fallbacks so a 429
-    # or transient error on the primary automatically tries the next provider.
-    primary = available[0]
-    if len(available) > 1:
-        _logger.info(
-            "Model with %d fallback(s): primary=%s",
-            len(available) - 1, type(primary).__name__,
-        )
-        return primary.with_fallbacks(available[1:])  # type: ignore[return-value]
-    return primary
+    # Return the first available BaseChatModel.  Fallbacks are attached
+    # later by _attach_fallbacks() inside create_deep_agent().
+    return available[0]
 
 
 def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic with many conditional branches
@@ -289,12 +282,14 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
         A configured deep agent.
     """
     if model is None:
-        model = get_default_model()  # already has fallbacks built in
+        model = get_default_model()  # returns first available BaseChatModel
     else:
         model = resolve_model(model)
-        # Attach fallbacks from other available providers so a 429 on the
-        # primary doesn't kill the entire run.
-        model = _attach_fallbacks(model)
+
+    # Build a fallback-wrapped model for create_agent() so a 429 on the
+    # primary automatically tries the next provider.  Keep the raw
+    # BaseChatModel for middleware that type-checks it.
+    model_with_fallbacks = _attach_fallbacks(model)
 
     backend = backend if backend is not None else (StateBackend)
 
@@ -423,7 +418,7 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
         final_system_prompt = system_prompt + "\n\n" + BASE_AGENT_PROMPT
 
     return create_agent(
-        model,
+        model_with_fallbacks,
         system_prompt=final_system_prompt,
         tools=tools,
         middleware=deepagent_middleware,

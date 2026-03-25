@@ -55,7 +55,6 @@ _TOOL_MODELS: list[tuple[str, str, str]] = [
     # --- Free-tier proxies (shared rate limits) ---
     ("openrouter",  "openrouter:mistralai/mistral-small-3.1-24b-instruct:free","OR Mistral Small 3.1"),    # can 429
     ("cerebras",    "cerebras:llama-3.3-70b",                    "Cerebras Llama-3.3-70B"),    # 600k TPM, very fast
-    ("openrouter",  "openrouter:deepseek/deepseek-chat-v3-0324:free", "OR DeepSeek Chat v3"),  # no TPM cap
     #
     # --- Fallback ---
     ("huggingface", "huggingface:Qwen/Qwen2.5-72B-Instruct",     "Qwen2.5-72B"),
