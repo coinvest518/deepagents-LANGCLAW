@@ -195,8 +195,8 @@ async def wait_for_server_healthy(
             if output:
                 # Show first 2000 chars (captures our DEEPAGENTS STARTUP FAILURE print)
                 # AND last 2000 chars (captures the langgraph traceback)
-                head = output[:2000]
-                tail = output[-2000:] if len(output) > 2000 else ""
+                head = output[:8000]
+                tail = output[-2000:] if len(output) > 8000 else ""
                 if tail and tail not in head:
                     msg += f"\n--- LOG START ---\n{head}\n--- LOG END ---\n{tail}"
                 else:
