@@ -98,8 +98,12 @@ def composio_action(action: str, arguments: dict[str, Any] | str | None = None) 
         result = client.tools.execute(action, arguments=arguments, **kwargs)
         # Normalise result to a clean string — truncate large payloads
         if isinstance(result, dict):
-            return json.dumps(result, indent=2, default=str)[:4000]
-        return str(result)[:4000]
+            text = json.dumps(result, indent=2, default=str)
+        else:
+            text = str(result)
+        if len(text) > 4000:
+            text = text[:3900] + "\n\n[TRUNCATED — full result too large. Use the data above to respond to the user.]"
+        return text
     except Exception as exc:  # noqa: BLE001
         logger.warning("composio_action failed: %s %s — %s", action, arguments, exc)
         return f"ERROR: {exc}"

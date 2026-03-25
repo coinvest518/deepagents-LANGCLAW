@@ -29,17 +29,15 @@ services:
     # Set SECRET values in the Render dashboard (never commit them here).
     # Non-secret defaults can be listed here with envVarGroups or inline.
     envVars:
-      - key: DA_MODEL
-        value: mistralai:mistral-large-latest
+      # DA_MODEL is NOT hardcoded — the model router auto-picks the best
+      # tool-calling model from available API keys set in Render dashboard.
+      # Override: set DA_MODEL in dashboard to force a specific model.
       - key: DA_AUTO_APPROVE
         value: "1"
       - key: DA_ENABLE_SHELL
         value: "0"
-      # Ollama configuration
-      - key: OLLAMA_BASE_URL
-        value: http://13.222.51.51:11434
-      - key: OLLAMA_MODEL
-        value: llama3.2:1b
+      # Ollama — set OLLAMA_BASE_URL and OLLAMA_MODEL in Render dashboard
+      # if you have a self-hosted Ollama instance for fast chat.
       # ElevenLabs — set these in the Render dashboard, NOT here
       # - key: ELEVENLABS_API_KEY
       # - key: ELEVEN_LABS_API_KEY

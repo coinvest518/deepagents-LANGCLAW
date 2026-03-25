@@ -42,9 +42,15 @@ RUN pip install "langchain-nvidia-ai-endpoints>=1.0.0" --root-user-action=ignore
 RUN pip install "langchain-mistralai>=0.2.0" --root-user-action=ignore || \
     echo "Mistral provider not available"
 RUN pip install "langchain-openai>=0.3.0" --root-user-action=ignore || \
-    echo "OpenAI/OpenRouter provider not available"
+    echo "OpenAI provider not available"
+RUN pip install "langchain-openrouter>=0.1.0" --root-user-action=ignore || \
+    echo "OpenRouter provider not available"
+RUN pip install "langchain-cerebras>=0.1.0" --root-user-action=ignore || \
+    echo "Cerebras provider not available"
 RUN pip install "langchain-anthropic>=0.3.0" --root-user-action=ignore || \
     echo "Anthropic provider not available"
+RUN pip install "langchain-google-genai>=4.2.0" --root-user-action=ignore || \
+    echo "Google GenAI provider not available"
 RUN pip install "langchain-huggingface>=0.1.0" --root-user-action=ignore || \
     echo "HuggingFace provider not available"
 

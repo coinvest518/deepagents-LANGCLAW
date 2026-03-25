@@ -28,6 +28,7 @@ from deepagents.backends.protocol import BackendFactory, BackendProtocol
 from deepagents.middleware.async_subagents import AsyncSubAgent, AsyncSubAgentMiddleware
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.memory import MemoryMiddleware
+from deepagents.middleware.loop_detection import LoopDetectionMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from deepagents.middleware.subagents import (
@@ -64,6 +65,11 @@ When the user asks you to do something:
 
 Keep working until the task is fully complete. Don't stop partway and explain what you would do — just do it. Only yield back to the user when the task is done or you're genuinely blocked.
 
+**When you receive tool results:**
+- Once a tool returns data, present it to the user. Do NOT call the same tool again unless the user asks for different data.
+- Never call the same tool with the same arguments more than once — you already have the result.
+- If the data is incomplete or truncated, work with what you have. Do not retry.
+
 **When things go wrong:**
 - If something fails repeatedly, stop and analyze *why* — don't keep retrying the same approach.
 - If you're blocked, tell the user what's wrong and ask for guidance.
@@ -76,35 +82,40 @@ For longer tasks, provide brief progress updates at reasonable intervals — a c
 def get_default_model() -> BaseChatModel:
     """Get the default model for deep agents.
 
-    Auto-detects the best available model from environment credentials.
-    Falls back to claude-sonnet-4-6 only when ANTHROPIC_API_KEY is set.
+    Auto-detects the best available model ranked by **tool-calling reliability**,
+    not just quota size.  Models that reliably follow tool schemas and know when
+    to stop calling tools are prioritised over high-quota but weaker models.
 
     Returns:
         A `BaseChatModel` instance.
     """
     import os
-    from langchain.chat_models import init_chat_model
 
-    # Priority: high-quota/strong models first; Mistral last (50k TPM hits fast on large tasks)
-    if os.environ.get("NVIDIA_API_KEY"):
-        return init_chat_model("nvidia:meta/llama-3.3-70b-instruct")
-    if os.environ.get("CEREBRAS_API_KEY"):
-        return init_chat_model("cerebras:llama3.1-8b")
-    if os.environ.get("OPENROUTER_API_KEY"):
-        return init_chat_model("openrouter:deepseek/deepseek-chat-v3-0324:free")
-    if os.environ.get("MISTRAL_API_KEY"):
-        return init_chat_model("mistralai:mistral-large-latest")
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return init_chat_model("anthropic:claude-sonnet-4-6")
-    if os.environ.get("HUGGINGFACEHUB_API_TOKEN"):
-        return init_chat_model("huggingface:Qwen/Qwen2.5-72B-Instruct")
-    if os.environ.get("OPENAI_API_KEY"):
-        return init_chat_model("openai:gpt-4o")
-    if os.environ.get("GOOGLE_API_KEY"):
-        return init_chat_model("google_genai:gemini-2.0-flash")
+    # Priority: best tool-calling models first from providers we actually have.
+    # OpenRouter proxies top models (Gemini Flash, etc.) for free — best tool caller.
+    # NVIDIA/Mistral have native tool-call APIs.  Cerebras is fast but weaker at tools.
+    # fmt: off
+    _CANDIDATES: list[tuple[str, str]] = [
+        # (env_var,                   model_spec)
+        ("OPENROUTER_API_KEY",       "openrouter:google/gemini-2.0-flash-exp:free"),  # best free tool-caller via proxy
+        ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),               # good native tool calling, 50k TPM
+        ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),           # decent tools, 400k TPM free
+        ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),                       # fast, moderate tool calling
+        ("HUGGINGFACEHUB_API_TOKEN", "huggingface:Qwen/Qwen2.5-72B-Instruct"),       # fallback
+        # Direct API keys (if user adds them later)
+        ("ANTHROPIC_API_KEY",        "anthropic:claude-sonnet-4-6"),
+        ("OPENAI_API_KEY",           "openai:gpt-4o"),
+        ("GOOGLE_API_KEY",           "google_genai:gemini-2.0-flash"),
+    ]
+    # fmt: on
+
+    for env_var, spec in _CANDIDATES:
+        if os.environ.get(env_var):
+            return resolve_model(spec)
+
     msg = (
-        "No LLM API key found. Set one of: NVIDIA_API_KEY, CEREBRAS_API_KEY, "
-        "OPENROUTER_API_KEY, MISTRAL_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY."
+        "No LLM API key found. Set one of: OPENROUTER_API_KEY, MISTRAL_API_KEY, "
+        "NVIDIA_API_KEY, CEREBRAS_API_KEY, HUGGINGFACEHUB_API_TOKEN."
     )
     raise RuntimeError(msg)
 
@@ -325,6 +336,7 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
             ),
             create_summarization_middleware(model, backend),
             *([_AnthropicCachingMiddleware(unsupported_model_behavior="ignore")] if _HAS_ANTHROPIC else []),
+            LoopDetectionMiddleware(),
             PatchToolCallsMiddleware(),
         ]
     )
@@ -360,7 +372,7 @@ def create_deep_agent(  # noqa: C901, PLR0912  # Complex graph assembly logic wi
         cache=cache,
     ).with_config(
         {
-            "recursion_limit": 1000,
+            "recursion_limit": 50,
             "metadata": {
                 "ls_integration": "deepagents",
             },

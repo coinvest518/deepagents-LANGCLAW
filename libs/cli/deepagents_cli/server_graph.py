@@ -133,8 +133,8 @@ def make_graph() -> Any:  # noqa: ANN401
             "Primary model '%s' failed (%s), trying fallback providers",
             config.model, model_err,
         )
-        # Try common fallback providers in order of likelihood
-        for fallback in ("mistralai:mistral-large-latest", "openai:gpt-4o", "anthropic:claude-3-5-sonnet-20241022"):
+        # Try fallback providers we have keys for — best tool-callers first
+        for fallback in ("openrouter:google/gemini-2.0-flash-exp:free", "mistralai:mistral-large-latest", "nvidia:meta/llama-3.3-70b-instruct"):
             try:
                 result = create_model(fallback, extra_kwargs=config.model_params)
                 logger.info("Fallback model '%s' loaded successfully", fallback)

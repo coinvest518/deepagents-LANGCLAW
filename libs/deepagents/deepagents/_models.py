@@ -13,8 +13,9 @@ def resolve_model(model: str | BaseChatModel) -> BaseChatModel:
 
     If `model` is already a `BaseChatModel`, returns it unchanged.
 
-    String models are resolved via `init_chat_model`. OpenAI models
-    (prefixed with `openai:`) default to the Responses API.
+    String models are resolved via `init_chat_model`. Providers not
+    registered with ``init_chat_model`` (e.g. Cerebras) are handled
+    via direct class import.
 
     Args:
         model: Model string or pre-configured model instance.
@@ -26,6 +27,11 @@ def resolve_model(model: str | BaseChatModel) -> BaseChatModel:
         return model
     if model.startswith("openai:"):
         return init_chat_model(model, use_responses_api=True)
+    # Cerebras isn't a registered init_chat_model provider — handle directly.
+    if model.startswith("cerebras:"):
+        from langchain_cerebras import ChatCerebras
+        model_name = model.split(":", 1)[1]
+        return ChatCerebras(model=model_name)
     return init_chat_model(model)
 
 

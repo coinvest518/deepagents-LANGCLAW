@@ -90,12 +90,12 @@ def _pick_model() -> str:
     picked = _router.pick("main")
     if picked:
         return picked
-    # Absolute fallback (router unavailable): strong/high-quota models first
+    # Absolute fallback (router unavailable): best tool-calling models first
     for env_key, spec in [
-        ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),
-        ("CEREBRAS_API_KEY",         "cerebras:llama3.1-8b"),
-        ("OPENROUTER_API_KEY",       "openrouter:deepseek/deepseek-chat-v3-0324:free"),
+        ("OPENROUTER_API_KEY",       "openrouter:google/gemini-2.0-flash-exp:free"),
         ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),
+        ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),
+        ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),
         ("HUGGINGFACEHUB_API_TOKEN", "huggingface:Qwen/Qwen2.5-72B-Instruct"),
         ("ANTHROPIC_API_KEY",        "anthropic:claude-sonnet-4-6"),
         ("OPENAI_API_KEY",           "openai:gpt-4o"),
@@ -142,7 +142,7 @@ def _pick_chat_model() -> str:
         model = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
         return f"ollama:{model}"
     if os.environ.get("CEREBRAS_API_KEY"):
-        return "cerebras:llama3.1-8b"
+        return "cerebras:llama-3.3-70b"
     if os.environ.get("MISTRAL_API_KEY"):
         return "mistralai:mistral-small-latest"
     return MODEL  # no cheaper option available → skip fast path
