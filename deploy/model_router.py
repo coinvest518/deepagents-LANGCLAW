@@ -45,15 +45,15 @@ FREE_TIER_TPM: dict[str, int | None] = {
 # ---------------------------------------------------------------------------
 _TOOL_MODELS: list[tuple[str, str, str]] = [
     # (provider_key, model_spec,                                  display_name)
-    # Ranked by TOOL-CALLING reliability for providers we actually have keys for.
-    # OpenRouter proxies models on the free tier — Mistral Small 3.1 has native tool calling.
+    # Ranked by reliability: direct-API providers first (own rate limits),
+    # then free-tier proxies (shared limits, can 429 easily).
     #
-    # --- Best tool calling (via OpenRouter free tier) ---
-    ("openrouter",  "openrouter:mistralai/mistral-small-3.1-24b-instruct:free","OR Mistral Small 3.1"),    # native tool calling, 128k ctx, free
+    # --- Direct API = own rate limit, most reliable ---
     ("mistralai",   "mistralai:mistral-large-latest",            "Mistral Large"),              # good native tools, 50k TPM
-    #
-    # --- High quota, decent tool calling ---
     ("nvidia",      "nvidia:meta/llama-3.3-70b-instruct",        "NVIDIA Llama-3.3-70B"),      # 400k TPM free
+    #
+    # --- Free-tier proxies (shared rate limits) ---
+    ("openrouter",  "openrouter:mistralai/mistral-small-3.1-24b-instruct:free","OR Mistral Small 3.1"),    # can 429
     ("cerebras",    "cerebras:llama-3.3-70b",                    "Cerebras Llama-3.3-70B"),    # 600k TPM, very fast
     ("openrouter",  "openrouter:deepseek/deepseek-chat-v3-0324:free", "OR DeepSeek Chat v3"),  # no TPM cap
     #

@@ -90,17 +90,16 @@ def _pick_model() -> str:
     picked = _router.pick("main")
     if picked:
         return picked
-    # Absolute fallback (router unavailable): best tool-calling models first
+    # Absolute fallback (router unavailable): direct-API providers first
     for env_key, spec in [
-        ("OPENROUTER_API_KEY",       "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"),
         ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),
         ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),
+        ("OPENROUTER_API_KEY",       "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"),
         ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),
         ("HUGGINGFACEHUB_API_TOKEN", "huggingface:Qwen/Qwen2.5-72B-Instruct"),
-        ("ANTHROPIC_API_KEY",        "anthropic:claude-sonnet-4-6"),
-        ("OPENAI_API_KEY",           "openai:gpt-4o"),
-        ("GOOGLE_API_KEY",           "google_genai:gemini-2.0-flash"),
     ]:
+
+
         if os.environ.get(env_key):
             return spec
     return ""

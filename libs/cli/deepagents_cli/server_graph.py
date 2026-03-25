@@ -134,7 +134,7 @@ def make_graph() -> Any:  # noqa: ANN401
             config.model, model_err,
         )
         # Try fallback providers we have keys for — best tool-callers first
-        for fallback in ("openrouter:mistralai/mistral-small-3.1-24b-instruct:free", "mistralai:mistral-large-latest", "nvidia:meta/llama-3.3-70b-instruct"):
+        for fallback in ("mistralai:mistral-large-latest", "nvidia:meta/llama-3.3-70b-instruct", "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"):
             try:
                 result = create_model(fallback, extra_kwargs=config.model_params)
                 logger.info("Fallback model '%s' loaded successfully", fallback)

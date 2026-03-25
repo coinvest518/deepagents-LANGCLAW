@@ -91,18 +91,19 @@ def get_default_model() -> BaseChatModel:
     """
     import os
 
-    # Priority: best tool-calling models first from providers we actually have.
-    # OpenRouter proxies top models (Gemini Flash, etc.) for free — best tool caller.
-    # NVIDIA/Mistral have native tool-call APIs.  Cerebras is fast but weaker at tools.
+    # Priority: reliable direct-API providers first (own rate limits),
+    # then free-tier proxies (shared rate limits, can 429 easily).
     # fmt: off
     _CANDIDATES: list[tuple[str, str]] = [
         # (env_var,                   model_spec)
-        ("OPENROUTER_API_KEY",       "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"),  # best free tool-caller via proxy
+        # --- Direct API keys = own rate limit, most reliable ---
         ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),               # good native tool calling, 50k TPM
         ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),           # decent tools, 400k TPM free
+        # --- Free-tier proxies (shared rate limits, can 429) ---
+        ("OPENROUTER_API_KEY",       "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"),
         ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),                       # fast, moderate tool calling
         ("HUGGINGFACEHUB_API_TOKEN", "huggingface:Qwen/Qwen2.5-72B-Instruct"),       # fallback
-        # Direct API keys (if user adds them later)
+        # --- Direct premium keys (if added later) ---
         ("ANTHROPIC_API_KEY",        "anthropic:claude-sonnet-4-6"),
         ("OPENAI_API_KEY",           "openai:gpt-4o"),
         ("GOOGLE_API_KEY",           "google_genai:gemini-2.0-flash"),
