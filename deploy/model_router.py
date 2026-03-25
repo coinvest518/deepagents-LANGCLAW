@@ -46,10 +46,10 @@ FREE_TIER_TPM: dict[str, int | None] = {
 _TOOL_MODELS: list[tuple[str, str, str]] = [
     # (provider_key, model_spec,                                  display_name)
     # Ranked by TOOL-CALLING reliability for providers we actually have keys for.
-    # OpenRouter proxies top-tier models (Gemini, etc.) on the free tier.
+    # OpenRouter proxies models on the free tier — Mistral Small 3.1 has native tool calling.
     #
-    # --- Best tool calling (via OpenRouter proxy to strong models) ---
-    ("openrouter",  "openrouter:google/gemini-2.0-flash-exp:free","OR Gemini 2.0 Flash"),      # best free tool-caller
+    # --- Best tool calling (via OpenRouter free tier) ---
+    ("openrouter",  "openrouter:mistralai/mistral-small-3.1-24b-instruct:free","OR Mistral Small 3.1"),    # native tool calling, 128k ctx, free
     ("mistralai",   "mistralai:mistral-large-latest",            "Mistral Large"),              # good native tools, 50k TPM
     #
     # --- High quota, decent tool calling ---

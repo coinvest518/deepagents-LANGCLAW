@@ -92,7 +92,7 @@ def _pick_model() -> str:
         return picked
     # Absolute fallback (router unavailable): best tool-calling models first
     for env_key, spec in [
-        ("OPENROUTER_API_KEY",       "openrouter:google/gemini-2.0-flash-exp:free"),
+        ("OPENROUTER_API_KEY",       "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"),
         ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),
         ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),
         ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),

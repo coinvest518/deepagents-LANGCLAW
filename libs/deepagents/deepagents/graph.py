@@ -97,7 +97,7 @@ def get_default_model() -> BaseChatModel:
     # fmt: off
     _CANDIDATES: list[tuple[str, str]] = [
         # (env_var,                   model_spec)
-        ("OPENROUTER_API_KEY",       "openrouter:google/gemini-2.0-flash-exp:free"),  # best free tool-caller via proxy
+        ("OPENROUTER_API_KEY",       "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"),  # best free tool-caller via proxy
         ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),               # good native tool calling, 50k TPM
         ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),           # decent tools, 400k TPM free
         ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),                       # fast, moderate tool calling
