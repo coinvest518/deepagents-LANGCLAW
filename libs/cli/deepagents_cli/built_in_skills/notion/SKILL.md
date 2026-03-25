@@ -393,11 +393,31 @@ Option B (exact):  NOTION_INSERT_ROW_DATABASE  →  typed properties object
 
 ## Common Mistakes to Avoid
 
-- `NOTION_SEARCH` is wrong → use `NOTION_SEARCH_NOTION_PAGE`
+**CRITICAL: Use EXACT slugs from this file. NEVER guess or shorten action names.**
+
+If unsure, call `composio_get_schema("NOTION_ACTION_NAME")` to verify.
+
+### Wrong slug → correct slug mapping
+
+| WRONG (will 404) | CORRECT |
+|---|---|
+| `NOTION_FETCH_PAGE` | `NOTION_RETRIEVE_PAGE` |
+| `NOTION_FETCH_PAGES` | `NOTION_SEARCH_NOTION_PAGE` or `NOTION_FETCH_DATA` |
+| `NOTION_GET_PAGE` | `NOTION_RETRIEVE_PAGE` |
+| `NOTION_LIST_PAGES` | `NOTION_FETCH_DATA` with `get_pages: true` |
+| `NOTION_SEARCH` | `NOTION_SEARCH_NOTION_PAGE` |
+| `NOTION_CREATE_PAGE` | `NOTION_CREATE_NOTION_PAGE` |
+| `NOTION_GET_DATABASE` | `NOTION_FETCH_DATABASE` |
+| `NOTION_LIST_DATABASES` | `NOTION_FETCH_DATA` with `get_databases: true` |
+| `NOTION_FETCH_BLOCK` | `NOTION_FETCH_ALL_BLOCK_CONTENTS` |
+| `NOTION_APPEND_BLOCK` | `NOTION_APPEND_TEXT_BLOCKS` |
+
+### Other rules
 - `NOTION_CREATE_DATABASE` parent must be a PAGE id, not a database id
 - `NOTION_CREATE_NOTION_PAGE` without parent_id always fails
 - Cannot create workspace root-level pages — always needs a parent
 - Do NOT call NOTION_FETCH_DATA before using known workspace IDs above
+- If an action returns a 404 error, check this table or call `composio_get_schema`
 
 ---
 
