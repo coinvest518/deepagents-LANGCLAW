@@ -170,11 +170,13 @@ def _write_pyproject(work_dir: Path) -> None:
         work_dir: Server working directory.
     """
     cli_dir = Path(__file__).parent.parent
+    deepagents_dir = cli_dir.parent / "deepagents"
     content = f"""[project]
 name = "deepagents-server-runtime"
 version = "0.0.1"
 requires-python = ">=3.11"
 dependencies = [
+    "deepagents @ file://{deepagents_dir}",
     "deepagents-cli[nvidia,ollama,openai,mistralai,anthropic,huggingface,cerebras] @ file://{cli_dir}",
 ]
 
