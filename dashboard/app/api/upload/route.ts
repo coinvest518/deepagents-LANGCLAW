@@ -4,7 +4,7 @@ export const runtime = 'nodejs'
 export const maxDuration = 60
 
 const MEM0_KEY = process.env.MEM0_API_KEY || ''
-const MEM0_BASE = 'https://api.mem0.ai/v1'
+const MEM0_BASE = 'https://api.mem0.ai/v2'
 
 function chunkText(text: string, size = 500, overlap = 60): string[] {
   const words = text.split(/\s+/).filter(Boolean)

@@ -99,8 +99,8 @@ def get_astra():
         return None, None
     try:
         from astrapy import DataAPIClient
-        client = DataAPIClient(token=api_key)
-        db = client.get_database(endpoint, keyspace=keyspace)
+        client = DataAPIClient()
+        db = client.get_database(endpoint, token=api_key)
         return db, keyspace
     except Exception as e:
         print(f"WARN: AstraDB unavailable — {e}")
@@ -161,14 +161,15 @@ def store_chunk(mem0, astra_db, chunk_text: str, meta: dict, chunk_id: str, vect
         except Exception as e:
             print(f"  WARN VectorStore: {e}")
 
-    # AstraDB — structured backup
+    # AstraDB — structured backup (use agent_documents collection)
     if astra_db:
         try:
-            col = astra_db.create_collection("knowledge_base", if_not_exists=True)
+            col = astra_db.get_collection("agent_documents")
             col.insert_one({
                 "_id": chunk_id,
                 "text": chunk_text,
                 "content": content,
+                "doc_type": "knowledge_base",
                 "ingested_at": datetime.utcnow().isoformat(),
                 **meta,
             })
@@ -211,9 +212,9 @@ def list_docs(mem0, astra_db):
 
     if astra_db:
         try:
-            col = astra_db.get_collection("knowledge_base")
+            col = astra_db.get_collection("agent_documents")
             seen = {}
-            for doc in col.find({}, limit=500):
+            for doc in col.find({"doc_type": "knowledge_base"}, limit=500):
                 fn = doc.get("filename", "?")
                 if fn not in seen:
                     seen[fn] = {"pages": set(), "chunks": 0}
@@ -251,8 +252,9 @@ def list_docs(mem0, astra_db):
 def clear_knowledge_base(astra_db):
     if astra_db:
         try:
-            astra_db.drop_collection("knowledge_base")
-            print("✓ AstraDB knowledge_base collection dropped")
+            col = astra_db.get_collection("agent_documents")
+            result = col.delete_many({"doc_type": "knowledge_base"})
+            print(f"✓ Deleted {result.deleted_count} knowledge base chunks from agent_documents")
         except Exception as e:
             print(f"WARN: {e}")
     print("NOTE: Mem0 memories cannot be bulk-deleted via API. Clear manually in Mem0 dashboard.")

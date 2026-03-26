@@ -361,53 +361,167 @@ _TOOL_LABELS: dict[str, str] = {
     # Composio single dispatcher
     "composio_action": "🔗 Composio",
     "composio": "🔗 Composio action",
+    "composio_get_schema": "📋 Discovering tool schema",
+    # Memory tools
+    "search_memory": "🧠 Searching memory",
+    "save_memory": "🧠 Saving to memory",
+    "search_database": "🗄️ Querying database",
+    "save_to_database": "🗄️ Saving to database",
+    # Calendar / Events
+    "GOOGLECALENDAR_CREATE_EVENT": "📅 Creating event",
+    "GOOGLECALENDAR_FIND_EVENT": "📅 Finding events",
+    "GOOGLECALENDAR_LIST_CALENDARS": "📅 Listing calendars",
+    # YouTube
+    "YOUTUBE_SEARCH_YOU_TUBE": "▶️ Searching YouTube",
+    "YOUTUBE_VIDEO_DETAILS": "▶️ Getting video details",
+    "YOUTUBE_LIST_CHANNEL_VIDEOS": "▶️ Listing videos",
+    # Dropbox
+    "DROPBOX_LIST_FILES_IN_FOLDER": "📦 Listing Dropbox",
+    "DROPBOX_EXPORT_FILE": "📦 Downloading from Dropbox",
+    "DROPBOX_UPLOAD_FILE_TO_DROPBOX": "📦 Uploading to Dropbox",
+    # Google Docs
+    "GOOGLEDOCS_GET_DOCUMENT_BY_ID": "📝 Reading Google Doc",
+    "GOOGLEDOCS_CREATE_NEW_GOOGLE_DOC": "📝 Creating Google Doc",
+    # Google Analytics
+    "GOOGLE_ANALYTICS_RUN_REPORT": "📈 Running analytics report",
+    # Notion extras
+    "NOTION_RETRIEVE_PAGE": "📓 Fetching Notion page",
+    "NOTION_FETCH_DATABASE": "📓 Fetching Notion DB",
+    "NOTION_INSERT_ROW_DATABASE": "📓 Adding Notion row",
+    "NOTION_APPEND_TEXT_BLOCKS": "📓 Writing Notion block",
 }
 
 
 def _tool_name_to_label(name: str) -> str:
-    """Map a raw tool name to an emoji label, falling back to the name itself."""
-    return _TOOL_LABELS.get(name, f"🔧 {name}")
+    """Map a raw tool name to an emoji label, falling back to the name itself.
+
+    For Composio SCREAMING_SNAKE_CASE actions not in _TOOL_LABELS, auto-generate
+    a readable label: GMAIL_SEND_EMAIL → "📧 Gmail: Send Email"
+    """
+    if name in _TOOL_LABELS:
+        return _TOOL_LABELS[name]
+    # Auto-label COMPOSIO_STYLE_ACTIONS → "🔗 Service: Action Words"
+    if "_" in name and name == name.upper():
+        parts = name.split("_", 1)
+        if len(parts) == 2:
+            service = parts[0].capitalize()
+            action = parts[1].replace("_", " ").title()
+            # Pick an emoji based on service
+            svc_icons = {
+                "GMAIL": "📧", "GITHUB": "🐙", "SLACK": "💬",
+                "NOTION": "📓", "YOUTUBE": "▶️", "TWITTER": "🐦",
+                "LINKEDIN": "💼", "INSTAGRAM": "📸", "FACEBOOK": "📘",
+                "DROPBOX": "📦", "TELEGRAM": "✈️",
+                "GOOGLESHEETS": "📊", "GOOGLEDRIVE": "📁",
+                "GOOGLEDOCS": "📝", "GOOGLECALENDAR": "📅",
+            }
+            icon = svc_icons.get(parts[0], "🔗")
+            return f"{icon} {service}: {action}"
+    return f"🔧 {name}"
+
+
+def _extract_tool_detail(tc: object) -> str:
+    """Build a human-readable label from a tool call INCLUDING its key argument.
+
+    Instead of just "📧 Sending email", shows "📧 Sending email → danny@example.com"
+    so the user sees WHAT the agent is actually doing.
+    """
+    name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+    args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+    if isinstance(args, str):
+        try:
+            import json as _j
+            args = _j.loads(args)
+        except Exception:
+            args = {}
+
+    label = _tool_name_to_label(name)
+
+    # Extract the most meaningful argument to show context
+    detail = ""
+    if isinstance(args, dict):
+        # Priority order: show the most informative arg
+        for key in ("query", "text", "url", "action", "command", "owner",
+                     "question", "title", "to", "channel", "path", "content",
+                     "repo", "database_id", "spreadsheet_id", "parent_id"):
+            val = args.get(key)
+            if val and isinstance(val, str):
+                detail = val[:60]
+                break
+        if not detail:
+            # Composio action: show the action slug
+            if name in ("composio_action", "composio") and args.get("action"):
+                action_slug = args["action"]
+                inner_args = args.get("arguments", {})
+                detail = action_slug
+                # Try to get a meaningful arg from the inner arguments too
+                if isinstance(inner_args, dict):
+                    for key in ("query", "text", "url", "to", "title", "path", "max_results"):
+                        val = inner_args.get(key)
+                        if val and isinstance(val, str):
+                            detail = f"{action_slug} → {val[:40]}"
+                            break
+
+    if detail:
+        return f"{label} → {detail}"
+    return label
+
+
+def _extract_msgs(node: object) -> list:
+    """Safely extract messages list from a graph node value."""
+    if isinstance(node, dict):
+        return node.get("messages", [])
+    return []
 
 
 def _status_from_update(data: dict) -> str:
     """Extract status from an 'updates' mode chunk (dict with node names as keys).
 
-    RemoteAgent.astream yields 3-tuples (namespace, mode, data).
-    When mode == 'updates', data looks like:
-        {"model": {"messages": [AIMessage(tool_calls=[...])]}}
-        {"tools": {"messages": [ToolMessage(name="web_search", ...)]}}
+    Handles ANY node name (model, agent, chatbot, tools, worker, etc.) — not
+    just hardcoded "model"/"tools". Extracts tool call details including
+    arguments so the user sees WHAT the agent is doing, not just "Thinking…".
     """
-    # model node — LLM decided to call tools (or is just thinking)
-    if "model" in data:
-        node = data["model"]
-        msgs = node.get("messages", []) if isinstance(node, dict) else []
+    # Skip interrupt-only updates
+    if "__interrupt__" in data:
+        return ""
+
+    for node_name, node_value in data.items():
+        if node_name.startswith("__"):
+            continue  # skip __interrupt__, __metadata__, etc.
+
+        msgs = _extract_msgs(node_value)
+        if not msgs:
+            continue
+
         for msg in msgs:
+            # Check for tool calls (LLM decided to invoke tools)
             tcs = (
                 getattr(msg, "tool_calls", None)
                 or (msg.get("tool_calls") if isinstance(msg, dict) else None)
                 or []
             )
             if tcs:
-                labels = [
-                    _tool_name_to_label(
-                        tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-                    )
-                    for tc in tcs
-                ]
-                return ", ".join(labels) + "…"
-        return "🤔 Thinking…"
+                labels = [_extract_tool_detail(tc) for tc in tcs]
+                return "\n".join(labels)
 
-    # tools node — tool results arriving
-    if "tools" in data:
-        node = data["tools"]
-        msgs = node.get("messages", []) if isinstance(node, dict) else []
-        names = []
-        for msg in msgs:
-            n = getattr(msg, "name", None) or (msg.get("name") if isinstance(msg, dict) else None)
-            if n:
-                names.append(_tool_name_to_label(n))
-        if names:
-            return ", ".join(names) + " ✓"
+            # Check for tool results (tool finished executing)
+            msg_type = getattr(msg, "type", "") or (msg.get("type", "") if isinstance(msg, dict) else "")
+            tool_name = getattr(msg, "name", None) or (msg.get("name") if isinstance(msg, dict) else None)
+            if tool_name and msg_type in ("tool", "ToolMessage"):
+                status_str = getattr(msg, "status", "success") if hasattr(msg, "status") else (msg.get("status", "success") if isinstance(msg, dict) else "success")
+                icon = "✓" if status_str == "success" else "✗"
+                return f"{_tool_name_to_label(tool_name)} {icon}"
+
+            # AI message with content but no tool calls = thinking/reasoning
+            content = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else None)
+            if content and msg_type in ("ai", "AIMessage", "AIMessageChunk"):
+                # Show a snippet of what the AI is actually writing
+                text = content if isinstance(content, str) else str(content)
+                text = text.strip()
+                if len(text) > 60:
+                    text = text[:57] + "…"
+                if text:
+                    return f"✍️ {text}"
 
     return ""
 
@@ -415,31 +529,28 @@ def _status_from_update(data: dict) -> str:
 def _status_from_message_chunk(msg: object) -> str:
     """Extract status from a streaming 'messages' mode message chunk.
 
-    These arrive as the model streams — tool_call_chunks appear as soon as the
-    model starts emitting a tool call, before the tool even runs.
+    Shows REAL details — tool names with arguments, content snippets — not
+    generic "Thinking…".
     """
     # Streaming tool call — name appears in the first chunk
     tcc = getattr(msg, "tool_call_chunks", None) or []
     if tcc:
-        names = [
-            tc.get("name") or ""
-            for tc in tcc
-            if isinstance(tc, dict)
-        ]
-        names = [n for n in names if n]
-        if names:
-            return ", ".join(_tool_name_to_label(n) for n in names) + "…"
+        labels = []
+        for tc in tcc:
+            if not isinstance(tc, dict):
+                continue
+            name = tc.get("name") or ""
+            if name:
+                labels.append(_tool_name_to_label(name))
+        if labels:
+            return "\n".join(labels)
 
-    # Fully resolved tool calls (non-streaming path)
+    # Fully resolved tool calls (non-streaming path) — show with args
     tc_list = getattr(msg, "tool_calls", None) or []
     if tc_list:
-        names = [
-            (tc.get("name") or "") if isinstance(tc, dict) else getattr(tc, "name", "")
-            for tc in tc_list
-        ]
-        names = [n for n in names if n]
-        if names:
-            return ", ".join(_tool_name_to_label(n) for n in names) + "…"
+        labels = [_extract_tool_detail(tc) for tc in tc_list]
+        if labels:
+            return "\n".join(labels)
 
     # Tool result — show what just finished
     tool_name = getattr(msg, "name", None)
@@ -447,10 +558,13 @@ def _status_from_message_chunk(msg: object) -> str:
     if tool_name and msg_type in ("tool", "ToolMessage"):
         return _tool_name_to_label(tool_name) + " ✓"
 
-    # Model streaming content = thinking
+    # Model streaming content — show a snippet, not just "Thinking…"
     content = getattr(msg, "content", None)
-    if content:
-        return "🤔 Thinking…"
+    if content and isinstance(content, str):
+        text = content.strip()
+        if text:
+            snippet = text[:60] + ("…" if len(text) > 60 else "")
+            return f"✍️ {snippet}"
 
     return ""
 
@@ -530,13 +644,13 @@ async def _run_agent(
                         status = _status_from_update(chunk)
                         await _maybe_update(status)
 
-            # Heartbeat: if silent too long, show "thinking"
+            # Heartbeat: if silent too long, show the AI is still processing
             if progress_cb is not None:
                 now = _time.monotonic()
                 if now - _last_heartbeat >= _HEARTBEAT_EVERY:
                     _last_heartbeat = now
                     try:
-                        await progress_cb("🤔 Thinking…")  # type: ignore[misc]
+                        await progress_cb("🧠 Reasoning…")  # type: ignore[misc]
                     except Exception:
                         pass
 
@@ -1094,18 +1208,21 @@ class HeadlessApp:
             await self._tg._start_thinking(telegram_chat_id)
 
             # ── Step-log progress callback ───────────────────────────────────
-            # Each meaningful step is appended to a running log that is edited
-            # into the placeholder message so the user sees the work building up.
+            # Real-time dashboard: numbered steps with elapsed time, edited
+            # into the placeholder message so the user sees EXACTLY what the
+            # agent is doing — not "Working…" placeholders.
             import time as _time
-            _steps: list[str] = []
-            _MAX_STEPS = 8
+            _steps: list[tuple[float, str]] = []  # (elapsed_secs, status)
+            _MAX_STEPS = 12
             _last_edit = 0.0
             _last_heartbeat = _time.monotonic()
+            _start_time = _time.monotonic()
             _MIN_EDIT_INTERVAL = 1.0   # Telegram rate limit: ~1 edit/s per message
             _HEARTBEAT_EVERY = 4.0
+            _step_counter = 0
 
             async def _progress(status: str) -> None:
-                nonlocal _last_edit, _last_heartbeat
+                nonlocal _last_edit, _last_heartbeat, _step_counter
                 if not status:
                     return
                 now = _time.monotonic()
@@ -1113,22 +1230,53 @@ class HeadlessApp:
                 if now - _last_edit < _MIN_EDIT_INTERVAL:
                     return
                 _last_edit = now
+                elapsed = now - _start_time
                 # Append step only when it differs from the last one
-                if not _steps or _steps[-1] != status:
-                    _steps.append(status)
+                last_status = _steps[-1][1] if _steps else ""
+                if status != last_status:
+                    _step_counter += 1
+                    _steps.append((elapsed, status))
                     if len(_steps) > _MAX_STEPS:
                         _steps.pop(0)
                 mid = self._tg._pending_placeholders.get(telegram_chat_id)
                 if not mid:
                     return
-                log_lines = "\n".join(f"<code>{s}</code>" for s in _steps)
+                # Build a real dashboard with step numbers and elapsed time
+                total_elapsed = int(now - _start_time)
+                mins, secs = divmod(total_elapsed, 60)
+                time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+                lines = []
+                for step_elapsed, step_text in _steps:
+                    se = int(step_elapsed)
+                    sm, ss = divmod(se, 60)
+                    ts = f"{sm}:{ss:02d}" if sm else f"0:{ss:02d}"
+                    # Escape HTML in step text
+                    safe_text = (step_text
+                                 .replace("&", "&amp;")
+                                 .replace("<", "&lt;")
+                                 .replace(">", "&gt;"))
+                    lines.append(f"<code>[{ts}]</code> {safe_text}")
+                log_block = "\n".join(lines)
+                header = (
+                    f"⚡ <b>Agent working</b>  •  "
+                    f"Step {_step_counter}  •  {time_str}"
+                )
+                full_text = f"{header}\n\n{log_block}"
                 try:
-                    await asyncio.to_thread(
-                        self._tg.edit_message,
+                    # Prefer sendMessageDraft (Bot API 9.5+) for smooth native
+                    # streaming. Falls back to editMessageText automatically.
+                    drafted = await asyncio.to_thread(
+                        self._tg.send_message_draft,
                         telegram_chat_id,
-                        mid,
-                        f"⏳ <b>Working…</b>\n\n{log_lines}",
+                        full_text,
                     )
+                    if not drafted:
+                        await asyncio.to_thread(
+                            self._tg.edit_message,
+                            telegram_chat_id,
+                            mid,
+                            full_text,
+                        )
                 except Exception:
                     pass
 
@@ -1365,11 +1513,20 @@ class HeadlessBot:
         self._tg.deliver_reply(chat_id, response)
 
     async def _handle_document(self, msg: dict, chat_id: int) -> None:
-        """Download a file sent to the bot and ingest it into the knowledge base."""
+        """Download a file, ingest it, then let the agent handle next steps.
+
+        Flow:
+        1. Download file from Telegram
+        2. Ingest into knowledge base (Mem0 + AstraDB agent_documents)
+        3. Extract a text preview
+        4. Pass a rich message to the agent so it can ask the user what
+           to do: summarize, convert to Google Doc, upload to Dropbox, etc.
+        """
         doc = msg.get("document", {})
         file_id = doc.get("file_id", "")
         filename = doc.get("file_name", "upload")
         mime = doc.get("mime_type", "")
+        file_size = doc.get("file_size", 0)
 
         allowed_ext = {".pdf", ".txt", ".md", ".rst", ".csv", ".json"}
         ext = Path(filename).suffix.lower()
@@ -1400,12 +1557,68 @@ class HeadlessBot:
             dl.raise_for_status()
             local_path.write_bytes(dl.content)
 
-            # Ingest in thread so we don't block the event loop
+            # Ingest into knowledge base in background thread
             summary = await asyncio.to_thread(_run_ingest_sync, str(local_path))
-            self._tg.send_message(
-                chat_id,
-                f"✅ Ingested <code>{filename}</code>\n<pre>{summary}</pre>",
+
+            # Extract a text preview for the agent
+            preview = ""
+            try:
+                if ext == ".pdf":
+                    import pypdf
+                    with open(str(local_path), "rb") as f:
+                        reader = pypdf.PdfReader(f)
+                        pages_text = []
+                        for i, page in enumerate(reader.pages[:3]):
+                            t = (page.extract_text() or "").strip()
+                            if t:
+                                pages_text.append(t[:500])
+                        preview = "\n---\n".join(pages_text)
+                        page_count = len(reader.pages)
+                else:
+                    text = local_path.read_text(encoding="utf-8", errors="ignore")
+                    preview = text[:1500]
+                    page_count = 1
+            except Exception:
+                preview = "(could not extract preview)"
+                page_count = 0
+
+            # Build a rich agent message with file context
+            size_kb = file_size / 1024 if file_size else len(dl.content) / 1024
+            agent_msg = (
+                f"The user just uploaded a document: **{filename}**\n"
+                f"- Type: {ext.upper().lstrip('.')} ({mime})\n"
+                f"- Size: {size_kb:.1f} KB, {page_count} page(s)\n"
+                f"- Status: Successfully ingested into knowledge base ({summary.splitlines()[-1] if summary.strip() else 'stored'})\n"
+                f"- File saved at: {local_path}\n\n"
+                f"**Document preview (first ~1500 chars):**\n```\n{preview[:1500]}\n```\n\n"
+                f"Ask the user what they'd like to do with this document. Suggest options like:\n"
+                f"1. **Summarize** the document\n"
+                f"2. **Extract key data** (tables, contacts, dates, etc.)\n"
+                f"3. **Upload to Google Docs** (use GOOGLEDOCS_CREATE_NEW_GOOGLE_DOC)\n"
+                f"4. **Upload to Google Sheets** (if it's tabular data)\n"
+                f"5. **Save to Dropbox** (use DROPBOX_UPLOAD_FILE_TO_DROPBOX)\n"
+                f"6. **Search/query** the content\n"
+                f"7. **Convert to another format**\n\n"
+                f"Present these as options and wait for the user's choice. "
+                f"After completing any action, return the link/result to the user."
             )
+
+            # Route through the normal agent flow (not bypass it)
+            caption = msg.get("caption", "").strip()
+            if caption:
+                agent_msg = f"User message: \"{caption}\"\n\n{agent_msg}"
+
+            # Create a synthetic update so handle_telegram_update routes it to agent
+            synthetic_update = {
+                "message": {
+                    "chat": {"id": chat_id},
+                    "from": msg.get("from", {}),
+                    "text": agent_msg,
+                    "message_id": msg.get("message_id", 0),
+                }
+            }
+            self._tg.handle_telegram_update(synthetic_update)
+
         except Exception as exc:
             logger.exception("Document ingest failed for %s", filename)
             self._tg.send_message(chat_id, f"❌ Failed to ingest {filename}: {exc}")

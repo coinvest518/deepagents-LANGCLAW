@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 
 const MEM0_KEY = process.env.MEM0_API_KEY || ''
-const MEM0_BASE = 'https://api.mem0.ai/v1'
+const MEM0_BASE = 'https://api.mem0.ai/v2'
 
 async function mem0Get(path: string, body?: object) {
   const r = await fetch(`${MEM0_BASE}${path}`, {
@@ -22,7 +22,11 @@ export async function GET(req: Request) {
 
   try {
     if (type === 'list') {
-      const data = await mem0Get('/memories/?user_id=knowledge_base&limit=200')
+      // Mem0 v2: use POST with filters instead of query params
+      const data = await mem0Get('/memories/list/', {
+        filters: { AND: [{ user_id: 'knowledge_base' }] },
+        limit: 200,
+      })
       const memories = data?.results ?? data ?? []
       // Group by filename
       const files: Record<string, { chunks: number; pages: number }> = {}
@@ -39,9 +43,10 @@ export async function GET(req: Request) {
 
     if (type === 'search') {
       if (!query) return NextResponse.json({ results: [] })
+      // Mem0 v2: filters required, user_id moves into filters
       const data = await mem0Get('/memories/search/', {
         query,
-        user_id: 'knowledge_base',
+        filters: { AND: [{ user_id: 'knowledge_base' }] },
         limit: 8,
       })
       const results = (data?.results ?? data ?? []).map((m: any) => ({

@@ -1,13 +1,20 @@
-"""LangChain tools that give the agent direct access to Mem0 and AstraDB.
+"""LangChain tools for agent memory, database, and document storage.
 
-These tools let the agent search, save, and retrieve memories and structured
-data without relying on shell scripts or external commands.
+Three separated concerns:
+- **Memory** (Mem0 + AstraDB ``agent_memory``): Semantic long-term memory — facts,
+  preferences, context the agent should recall across conversations.
+- **Database** (AstraDB ``agent_data``): Structured key-value data — records, configs,
+  extracted data, analysis results.
+- **Documents** (AstraDB ``agent_documents``): Document storage — PDFs, notes,
+  web content, any text content with titles and tags.
 
 Tools:
-- ``search_memory``   — semantic search across Mem0 (natural language queries)
-- ``save_memory``     — store a new memory/fact in Mem0 (+ AstraDB backup)
-- ``search_database`` — list/browse documents stored in AstraDB
-- ``save_to_database``— store structured data in AstraDB (+ Mem0 backup)
+- ``search_memory``     — search long-term memory (Mem0 semantic + AstraDB filter)
+- ``save_memory``       — store a new memory/fact
+- ``search_database``   — search structured data records
+- ``save_to_database``  — store structured key-value data
+- ``search_documents``  — search stored documents by type/tags
+- ``save_document``     — store a document (notes, PDFs, web content)
 """
 
 from __future__ import annotations
@@ -22,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Lazy singleton stores — initialised on first tool call, not at import time.
-# This avoids import errors when mem0ai / astrapy aren't installed.
 # ---------------------------------------------------------------------------
 _mem0_store: Any = None
 _astra_store: Any = None
@@ -30,7 +36,7 @@ _stores_initialised = False
 
 
 def _ensure_stores() -> None:
-    """Lazily initialise Mem0Store and AstraStore from env vars."""
+    """Lazily initialise Mem0 and AstraDB stores from env vars."""
     global _mem0_store, _astra_store, _stores_initialised
     if _stores_initialised:
         return
@@ -44,7 +50,7 @@ def _ensure_stores() -> None:
         except Exception:
             logger.warning("memory_tools: Mem0Store init failed", exc_info=True)
 
-    if os.environ.get("ASTRA_DB_API_KEY"):
+    if os.environ.get("ASTRA_DB_API_KEY") and os.environ.get("ASTRA_DB_ENDPOINT"):
         try:
             from deepagents.store_adapters.astra_store import AstraStore
             _astra_store = AstraStore.from_env()
@@ -53,65 +59,94 @@ def _ensure_stores() -> None:
             logger.warning("memory_tools: AstraStore init failed", exc_info=True)
 
 
-# Default namespace used for agent memories
-_DEFAULT_NS = ("agent", "memories")
-_DEFAULT_DB_NS = ("agent", "data")
-
-
 # ---------------------------------------------------------------------------
-# Memory tools (Mem0-backed semantic memory)
+# 1. MEMORY tools — semantic long-term memory
 # ---------------------------------------------------------------------------
 
 @tool
-def search_memory(query: str, user_id: str = "default") -> dict[str, Any]:
-    """Search the agent's long-term memory using natural language.
+def search_memory(query: str, user_id: str = "default", category: str = "") -> dict[str, Any]:
+    """Search the agent's long-term memory for facts, preferences, or past context.
 
-    Use this when the user asks you to recall, remember, or look up something
-    from past conversations or stored knowledge. Mem0 performs semantic search
-    so the query can be conversational (e.g. "what did we discuss about pricing").
+    Use when the user asks to recall, remember, or look up something from
+    past conversations. Mem0 does semantic search; AstraDB does filter search.
 
     Args:
         query: Natural language search query.
-        user_id: User namespace for memory isolation (default: "default").
+        user_id: User namespace for isolation (default: "default").
+        category: Optional category filter (e.g. "preference", "fact", "context").
 
     Returns:
         Dict with "memories" list and "count", or "error" on failure.
     """
     _ensure_stores()
-    if _mem0_store is None:
-        return {"error": "Mem0 is not configured. Set MEM0_API_KEY.", "memories": []}
+    if _mem0_store is None and _astra_store is None:
+        return {"error": "No memory backend configured. Set MEM0_API_KEY or ASTRA_DB_API_KEY.", "memories": []}
 
-    namespace = ("user", user_id)
-    try:
-        # Use the mem0 client's native search for semantic matching
-        results = _mem0_store.client.search(query, user_id=user_id, limit=10)
-        memories = []
-        for r in results or []:
-            memories.append({
-                "id": r.get("id", ""),
-                "memory": r.get("memory", ""),
-                "score": r.get("score", None),
-            })
-        return {"memories": memories, "count": len(memories), "query": query}
-    except Exception as exc:
-        logger.warning("search_memory failed", exc_info=True)
-        return {"error": str(exc), "memories": []}
+    memories: list[dict] = []
+    errors: list[str] = []
+
+    # Mem0: semantic search (primary)
+    if _mem0_store is not None:
+        try:
+            # Mem0 v2 API requires filters dict; returns {"results": [...]}
+            raw = _mem0_store.client.search(
+                query,
+                filters={"AND": [{"user_id": user_id}]},
+                limit=10,
+            )
+            # v2 wraps in {"results": [...]}, v1 returns list directly
+            hits = raw.get("results", raw) if isinstance(raw, dict) else (raw or [])
+            for r in hits:
+                if not isinstance(r, dict):
+                    continue
+                memories.append({
+                    "id": r.get("id", ""),
+                    "memory": r.get("memory", ""),
+                    "score": r.get("score", None),
+                    "source": "mem0",
+                })
+        except Exception as exc:
+            errors.append(f"Mem0: {exc}")
+            logger.warning("search_memory Mem0 failed", exc_info=True)
+
+    # AstraDB: filter search (supplement)
+    if _astra_store is not None:
+        try:
+            items = _astra_store.search_memory(
+                user_id=user_id,
+                category=category or None,
+                limit=10,
+            )
+            for item in items:
+                memories.append({
+                    "id": item.key,
+                    "memory": item.value.get("content", ""),
+                    "category": item.value.get("category", ""),
+                    "created_at": item.value.get("created_at", ""),
+                    "source": "astradb",
+                })
+        except Exception as exc:
+            errors.append(f"AstraDB: {exc}")
+            logger.warning("search_memory AstraDB failed", exc_info=True)
+
+    result: dict[str, Any] = {"memories": memories, "count": len(memories), "query": query}
+    if errors:
+        result["warnings"] = errors
+    return result
 
 
 @tool
-def save_memory(content: str, user_id: str = "default") -> dict[str, Any]:
+def save_memory(content: str, user_id: str = "default", category: str = "general") -> dict[str, Any]:
     """Save a fact, preference, or piece of information to long-term memory.
 
-    Use this when the user says "remember this", "save this for later",
+    Use when the user says "remember this", "save this for later",
     "note that I prefer X", or when you learn an important fact worth
     persisting across conversations.
 
-    The content is stored in Mem0 (semantic search) and backed up to AstraDB
-    if configured.
-
     Args:
         content: The information to remember (plain text).
-        user_id: User namespace for memory isolation (default: "default").
+        user_id: User namespace for isolation (default: "default").
+        category: Category tag — "preference", "fact", "context", "general".
 
     Returns:
         Dict with "saved": True on success, or "error" on failure.
@@ -121,73 +156,72 @@ def save_memory(content: str, user_id: str = "default") -> dict[str, Any]:
         return {"error": "No memory backend configured. Set MEM0_API_KEY or ASTRA_DB_API_KEY."}
 
     errors: list[str] = []
+    saved_to: list[str] = []
 
-    # Write to Mem0 (primary — semantic)
+    # Write to Mem0 (semantic)
     if _mem0_store is not None:
         try:
             _mem0_store.client.add(
                 [{"role": "user", "content": content}],
                 user_id=user_id,
             )
+            saved_to.append("mem0")
         except Exception as exc:
             errors.append(f"Mem0: {exc}")
             logger.warning("save_memory Mem0 failed", exc_info=True)
 
-    # Write-through to AstraDB (backup)
+    # Write to AstraDB (structured)
     if _astra_store is not None:
         try:
-            import hashlib
-            key = hashlib.md5(content.encode()).hexdigest()[:16]
-            _astra_store.put(
-                _DEFAULT_DB_NS,
-                key,
-                {"content": content, "user_id": user_id, "type": "memory"},
+            doc_id = _astra_store.save_memory(
+                content=content,
+                user_id=user_id,
+                category=category,
             )
+            saved_to.append("astradb")
         except Exception as exc:
             errors.append(f"AstraDB: {exc}")
             logger.warning("save_memory AstraDB failed", exc_info=True)
 
-    if errors and _mem0_store is None:
+    if not saved_to:
         return {"error": "; ".join(errors), "saved": False}
 
-    return {"saved": True, "content_preview": content[:100]}
+    return {"saved": True, "saved_to": saved_to, "content_preview": content[:100]}
 
 
 # ---------------------------------------------------------------------------
-# Database tools (AstraDB-backed structured storage)
+# 2. DATABASE tools — structured key-value storage
 # ---------------------------------------------------------------------------
 
 @tool
 def search_database(
-    collection: str = "agent__data",
-    query: str = "",
+    query_filter: dict[str, Any] | None = None,
     limit: int = 20,
 ) -> dict[str, Any]:
-    """Browse or search documents stored in the AstraDB database.
+    """Search structured data records in the AstraDB database.
 
-    Use this when the user asks to look up stored data, check the database,
-    list saved records, or retrieve structured information that was
-    previously saved with save_to_database.
+    Use when the user asks to look up stored data, check records, or
+    retrieve structured information saved with save_to_database.
 
     Args:
-        collection: AstraDB collection name (default: "agent__data").
-        query: Optional filter query (currently lists all docs in collection).
-        limit: Maximum number of results to return (default 20).
+        query_filter: Optional MongoDB-style filter (e.g. {"type": "config"}).
+                      Pass None or {} to list all records.
+        limit: Maximum results (default 20).
 
     Returns:
         Dict with "documents" list and "count", or "error" on failure.
     """
     _ensure_stores()
     if _astra_store is None:
-        return {"error": "AstraDB is not configured. Set ASTRA_DB_API_KEY + ASTRA_DB_ENDPOINT + ASTRA_DB_KEYSPACE.", "documents": []}
+        return {"error": "AstraDB not configured. Set ASTRA_DB_API_KEY + ASTRA_DB_ENDPOINT.", "documents": []}
 
     try:
-        namespace = tuple(collection.split("__")) if "__" in collection else ("agent", collection)
-        items = _astra_store.search(namespace)
-        docs = []
-        for item in (items or [])[:limit]:
-            docs.append({"key": item.key, "value": item.value})
-        return {"documents": docs, "count": len(docs), "collection": collection}
+        items = _astra_store.search(
+            query_filter=query_filter,
+            limit=limit,
+        )
+        docs = [{"key": item.key, "value": item.value} for item in items]
+        return {"documents": docs, "count": len(docs)}
     except Exception as exc:
         logger.warning("search_database failed", exc_info=True)
         return {"error": str(exc), "documents": []}
@@ -197,54 +231,117 @@ def search_database(
 def save_to_database(
     key: str,
     data: dict[str, Any],
-    collection: str = "agent__data",
 ) -> dict[str, Any]:
     """Store structured data in the AstraDB database.
 
-    Use this when the user wants to persist structured information — JSON data,
-    records, analysis results, extracted data from documents, etc. This is for
-    structured/tabular data; use save_memory for natural-language facts.
-
-    The data is also backed up to Mem0 if configured.
+    Use for structured/tabular data — JSON records, analysis results,
+    extracted data, configs. For natural-language facts use save_memory instead.
 
     Args:
-        key: Unique identifier for this document.
+        key: Unique identifier for this record.
         data: Dictionary of data to store.
-        collection: AstraDB collection name (default: "agent__data").
 
     Returns:
         Dict with "saved": True on success, or "error" on failure.
     """
     _ensure_stores()
     if _astra_store is None:
-        return {"error": "AstraDB is not configured. Set ASTRA_DB_API_KEY + ASTRA_DB_ENDPOINT + ASTRA_DB_KEYSPACE."}
-
-    namespace = tuple(collection.split("__")) if "__" in collection else ("agent", collection)
-    errors: list[str] = []
+        return {"error": "AstraDB not configured. Set ASTRA_DB_API_KEY + ASTRA_DB_ENDPOINT."}
 
     try:
-        _astra_store.put(namespace, key, data)
+        _astra_store.put(key=key, value=data)
+        return {"saved": True, "key": key}
     except Exception as exc:
-        errors.append(f"AstraDB: {exc}")
-        logger.warning("save_to_database AstraDB failed", exc_info=True)
+        logger.warning("save_to_database failed", exc_info=True)
+        return {"error": str(exc), "saved": False}
 
-    # Write-through to Mem0 as a summary
-    if _mem0_store is not None:
-        try:
-            summary = f"Saved to database [{collection}] key={key}: {str(data)[:500]}"
-            _mem0_store.client.add(
-                [{"role": "user", "content": summary}],
-                user_id="database_records",
-            )
-        except Exception:
-            logger.debug("save_to_database Mem0 backup failed", exc_info=True)
 
-    if errors:
-        return {"error": "; ".join(errors), "saved": False}
-    return {"saved": True, "key": key, "collection": collection}
+# ---------------------------------------------------------------------------
+# 3. DOCUMENT tools — document/content storage
+# ---------------------------------------------------------------------------
+
+@tool
+def search_documents(
+    doc_type: str = "",
+    tags: list[str] | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Search stored documents (notes, PDFs, web content, etc.).
+
+    Use when the user asks to find saved documents, notes, or content
+    that was previously stored with save_document.
+
+    Args:
+        doc_type: Filter by type — "note", "pdf", "web", "email", etc. Empty for all.
+        tags: Filter by tags (matches any). E.g. ["work", "project-x"].
+        limit: Maximum results (default 20).
+
+    Returns:
+        Dict with "documents" list and "count", or "error" on failure.
+    """
+    _ensure_stores()
+    if _astra_store is None:
+        return {"error": "AstraDB not configured. Set ASTRA_DB_API_KEY + ASTRA_DB_ENDPOINT.", "documents": []}
+
+    try:
+        items = _astra_store.search_documents(
+            doc_type=doc_type or None,
+            tags=tags,
+            limit=limit,
+        )
+        docs = [{"id": item.key, "title": item.value.get("title", ""), "doc_type": item.value.get("doc_type", ""), "tags": item.value.get("tags", []), "created_at": item.value.get("created_at", "")} for item in items]
+        return {"documents": docs, "count": len(docs)}
+    except Exception as exc:
+        logger.warning("search_documents failed", exc_info=True)
+        return {"error": str(exc), "documents": []}
+
+
+@tool
+def save_document(
+    title: str,
+    content: str,
+    doc_type: str = "note",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Save a document (note, PDF text, web content, email, etc.) to storage.
+
+    Use when the user wants to save content for later — notes, extracted
+    PDF text, web page content, email archives, etc.
+
+    Args:
+        title: Document title.
+        content: Full text content.
+        doc_type: Type — "note", "pdf", "web", "email", "report", etc.
+        tags: Optional tags for categorization.
+
+    Returns:
+        Dict with "saved": True and document id, or "error" on failure.
+    """
+    _ensure_stores()
+    if _astra_store is None:
+        return {"error": "AstraDB not configured. Set ASTRA_DB_API_KEY + ASTRA_DB_ENDPOINT."}
+
+    try:
+        doc_id = _astra_store.save_document(
+            title=title,
+            content=content,
+            doc_type=doc_type,
+            tags=tags,
+        )
+        return {"saved": True, "id": doc_id, "title": title}
+    except Exception as exc:
+        logger.warning("save_document failed", exc_info=True)
+        return {"error": str(exc), "saved": False}
 
 
 # ---------------------------------------------------------------------------
 # Convenience list for importing into the agent tool list
 # ---------------------------------------------------------------------------
-MEMORY_TOOLS = [search_memory, save_memory, search_database, save_to_database]
+MEMORY_TOOLS = [
+    search_memory,
+    save_memory,
+    search_database,
+    save_to_database,
+    search_documents,
+    save_document,
+]

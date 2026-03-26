@@ -242,6 +242,60 @@ class TelegramIntegration:
         else:
             return True
 
+    # ------------------------------------------------------------------
+    # Draft streaming (Bot API 9.5+)
+    # ------------------------------------------------------------------
+    _draft_supported: bool | None = None  # tri-state: None=unknown, True/False
+
+    def send_message_draft(
+        self,
+        chat_id: int,
+        text: str,
+        parse_mode: str | None = "HTML",
+    ) -> bool:
+        """Stream a partial message via ``sendMessageDraft`` (Bot API 9.5+).
+
+        This shows a native "typing bubble" with live-updating text — smoother
+        than the old ``editMessageText`` loop. Falls back to ``False`` (caller
+        should use ``edit_message``) if the API returns 400/404 (old Bot API).
+
+        Args:
+            chat_id: Target Telegram chat.
+            text: Accumulated text so far (partial response).
+            parse_mode: ``"HTML"`` or ``None``.
+
+        Returns:
+            ``True`` if the draft was sent, ``False`` if unsupported/failed.
+        """
+        if not BOT_TOKEN:
+            return False
+        # Once we know drafts aren't supported, skip the API call
+        if self._draft_supported is False:
+            return False
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        try:
+            resp = requests.post(
+                f"{BASE_URL}/sendMessageDraft",
+                json=payload,
+                timeout=10,
+            )
+            if resp.status_code in (400, 404):
+                # Bot API too old — disable for rest of session
+                TelegramIntegration._draft_supported = False
+                logger.debug("sendMessageDraft not supported, falling back to editMessageText")
+                return False
+            resp.raise_for_status()
+            TelegramIntegration._draft_supported = True
+            return True
+        except Exception:
+            logger.debug("sendMessageDraft failed for chat_id=%d", chat_id, exc_info=True)
+            return False
+
     def send_question_with_keyboard(  # noqa: PLR6301
         self,
         chat_id: int,

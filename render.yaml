@@ -36,6 +36,14 @@ services:
         value: "1"
       - key: DA_ENABLE_SHELL
         value: "0"
+      # LangSmith — set these in the Render dashboard for tracing/dashboard
+      # - key: LANGSMITH_API_KEY          (required for tracing)
+      # - key: LANGSMITH_PROJECT          (project name, e.g. "deepagents")
+      # - key: LANGSMITH_TRACING_V2       (set to "true" to enable)
+      # Memory & Database — set in Render dashboard
+      # - key: MEM0_API_KEY               (Mem0 semantic memory)
+      # - key: ASTRA_DB_API_KEY           (AstraDB structured storage)
+      # - key: ASTRA_DB_ENDPOINT          (AstraDB endpoint URL)
       # Ollama — set OLLAMA_BASE_URL and OLLAMA_MODEL in Render dashboard
       # if you have a self-hosted Ollama instance for fast chat.
       # ElevenLabs — set these in the Render dashboard, NOT here

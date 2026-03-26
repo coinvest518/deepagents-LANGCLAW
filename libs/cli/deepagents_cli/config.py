@@ -1229,8 +1229,10 @@ def get_langsmith_project_name() -> str | None:
     langsmith_key = os.environ.get("LANGSMITH_API_KEY") or os.environ.get(
         "LANGCHAIN_API_KEY"
     )
-    langsmith_tracing = os.environ.get("LANGSMITH_TRACING") or os.environ.get(
-        "LANGCHAIN_TRACING_V2"
+    langsmith_tracing = (
+        os.environ.get("LANGSMITH_TRACING_V2")
+        or os.environ.get("LANGCHAIN_TRACING_V2")
+        or os.environ.get("LANGSMITH_TRACING")
     )
     if not (langsmith_key and langsmith_tracing):
         return None
