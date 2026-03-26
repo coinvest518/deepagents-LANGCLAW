@@ -41,7 +41,7 @@ print(json.dumps(result, default=str)[:2000])
 | `SLACK_LIST_CONVERSATIONS` | `types` (public_channel,private_channel,im,mpim), `limit` |
 | `SLACK_FETCH_CONVERSATION_HISTORY` | `channel`, `limit` |
 | `SLACK_ADD_REACTION_TO_AN_ITEM` | `channel`, `timestamp`, `name` (emoji without :) |
-| `SLACK_UPLOAD_A_FILE` | `channels`, `filename`, `content`, `filetype` |
+| ~~`SLACK_UPLOAD_A_FILE`~~ | *(unavailable — use file upload via Slack API directly)* |
 | `SLACK_CREATE_A_REMINDER` | `text`, `time`, `user` |
 
 ## Discover actions

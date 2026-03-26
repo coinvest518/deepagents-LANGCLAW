@@ -41,10 +41,10 @@ print(json.dumps(result, default=str)[:2000])
 | `GITHUB_CREATE_AN_ISSUE` | `owner`, `repo`, `title`, `body` |
 | `GITHUB_CREATE_A_PULL_REQUEST` | `owner`, `repo`, `title`, `head`, `base`, `body` |
 | `GITHUB_GET_A_REPOSITORY` | `owner`, `repo` |
-| `GITHUB_LIST_REPOSITORIES_FOR_AUTHENTICATED_USER` | `per_page`, `page` |
+| `GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER` | `per_page`, `page` |
 | `GITHUB_LIST_COMMITS` | `owner`, `repo`, `sha` (branch) |
 | `GITHUB_ADD_LABELS_TO_AN_ISSUE` | `owner`, `repo`, `issue_number`, `labels` |
-| `GITHUB_CREATE_A_COMMENT_ON_ISSUE` | `owner`, `repo`, `issue_number`, `body` |
+| `GITHUB_CREATE_AN_ISSUE_COMMENT` | `owner`, `repo`, `issue_number`, `body` |
 
 ## Discover more actions
 
