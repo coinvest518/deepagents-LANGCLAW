@@ -240,11 +240,25 @@ def composio_action(action: str, arguments: dict[str, Any] | str | None = None) 
         return text
     except Exception as exc:  # noqa: BLE001
         logger.warning("composio_action failed: %s %s — %s", action, arguments, exc)
-        hint = (
-            f"ERROR: {exc}\n\n"
-            f"HINT: Call composio_get_schema(\"{action}\") to see the correct "
-            f"parameters for this action. Check parameter names, types, and "
-            f"required fields. If the action slug is wrong, check the relevant "
-            f"skill documentation for the correct action name."
-        )
+        err_str = str(exc)
+        if "404" in err_str or "not found" in err_str.lower():
+            # Slug itself is wrong — composio_get_schema would also 404
+            toolkit = action.split("_", maxsplit=1)[0]
+            hint = (
+                f"ERROR: {exc}\n\n"
+                f"ACTION SLUG '{action}' DOES NOT EXIST. Do NOT retry with the same slug.\n"
+                f"FIX: Read the '{toolkit.lower()}' skill documentation to find the EXACT "
+                f"correct action slug. Composio action names are specific — common mistakes:\n"
+                f"  - NOTION_ADD_BLOCK → NOTION_APPEND_TEXT_BLOCKS\n"
+                f"  - NOTION_FETCH_PAGE → NOTION_RETRIEVE_PAGE\n"
+                f"  - GMAIL_GET_EMAILS → GMAIL_FETCH_EMAILS\n"
+                f"The skill file has a 'wrong slug → correct slug' mapping table."
+            )
+        else:
+            # Action exists but call failed — check parameters
+            hint = (
+                f"ERROR: {exc}\n\n"
+                f"HINT: Call composio_get_schema(\"{action}\") to see the correct "
+                f"parameters. Check parameter names, types, and required fields."
+            )
         return hint
