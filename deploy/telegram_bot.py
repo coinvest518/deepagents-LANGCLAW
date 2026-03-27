@@ -165,6 +165,11 @@ _TASK_WORDS = frozenset({
     "slack", "notion", "dropbox", "twitter", "linkedin", "instagram",
     "facebook", "youtube", "serpapi", "analytics",
     "calendar", "airtable",
+    # Info queries that need web search — Musa has NO web tools
+    "weather", "stock", "price", "news", "score", "lookup",
+    "browse", "google", "bing", "web",
+    # Memory/system queries
+    "remember", "memory", "recall", "trace", "langsmith", "dashboard",
 })
 
 # Phrases that mean "I'm handing this off" — Musa says these when escalating.
@@ -263,15 +268,25 @@ def _clear_webhook() -> None:
 
 def _text_from_message(msg: object) -> str:
     """Extract plain text from a message — handles LangChain objects AND plain
-    dicts (aget_state returns raw dicts from the JSON state, not LC objects)."""
+    dicts (aget_state returns raw dicts from the JSON state, not LC objects).
+
+    Must handle all message formats: LangChain BaseMessage subclasses,
+    raw dicts from JSON state, and edge cases from fallback models.
+    """
     if isinstance(msg, dict):
         # Only AI messages contain the response text
-        if msg.get("type") not in ("ai", "AIMessage", "AIMessageChunk"):
+        msg_type = msg.get("type", "")
+        # Accept: "ai", "AIMessage", "AIMessageChunk", or missing type with content
+        if msg_type and msg_type not in ("ai", "AIMessage", "AIMessageChunk"):
             return ""
         if msg.get("tool_calls"):  # intermediate step, not the answer
             return ""
         content = msg.get("content", "")
     else:
+        # LangChain message objects — check type name
+        type_name = getattr(msg, "type", "") or type(msg).__name__
+        if type_name not in ("ai", "AIMessage", "AIMessageChunk") and "AI" not in type(msg).__name__:
+            return ""
         if getattr(msg, "tool_calls", None):
             return ""
         content = getattr(msg, "content", "")

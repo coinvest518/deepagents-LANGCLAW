@@ -525,8 +525,18 @@ class TelegramIntegration:
             placeholder_id: Message ID of the ``⏳`` placeholder, if any.
             content: Raw agent response text (markdown).
         """
+        # Guard: if content is empty/whitespace, send a fallback message
+        # instead of silently leaving the placeholder stuck on "Working…"
+        if not content or not content.strip():
+            content = "(No response received — the agent may have timed out or hit a rate limit. Try again or /reset.)"
+            logger.warning("Empty agent response for chat_id=%d — sending fallback", chat_id)
+
         formatted = self._md_to_telegram_html(content)
         chunks = self._split_message(formatted)
+
+        if not chunks:
+            # _split_message returned nothing — force a fallback
+            chunks = ["(Empty response — try again or /reset.)"]
 
         for i, chunk in enumerate(chunks):
             if i == 0 and placeholder_id:
