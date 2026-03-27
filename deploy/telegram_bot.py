@@ -165,11 +165,8 @@ _TASK_WORDS = frozenset({
     "slack", "notion", "dropbox", "twitter", "linkedin", "instagram",
     "facebook", "youtube", "serpapi", "analytics",
     "calendar", "airtable",
-    # Info queries that need web search — Musa has NO web tools
-    "weather", "stock", "price", "news", "score", "lookup",
-    "browse", "google", "bing", "web",
-    # Memory/system queries
-    "remember", "memory", "recall", "trace", "langsmith", "dashboard",
+    # System queries that need the full agent (not Musa)
+    "trace", "langsmith", "dashboard",
 })
 
 # Phrases that mean "I'm handing this off" — Musa says these when escalating.
@@ -207,6 +204,51 @@ def _needs_full_agent(text: str) -> bool:
     )
 
 
+def _is_casual(message: str) -> bool:
+    """Determine if a message is casual chat suitable for quick response.
+
+    Returns True for:
+    - Short messages (< 100 chars)
+    - Greetings and casual questions
+    - Simple factual queries that don't need multi-step workflows
+    - Messages that don't contain task words or service nouns
+    """
+    text = message.strip().lower()
+    words = text.split()
+
+    # Short messages are likely casual
+    if len(text) < 100:
+        return True
+
+    # Greetings and casual phrases
+    casual_phrases = {
+        "hello", "hi", "hey", "how are you", "howdy", "good morning",
+        "good afternoon", "good evening", "what's up", "sup", "yo",
+        "how's it going", "how are things", "what's new", "what's happening"
+    }
+
+    if any(phrase in text for phrase in casual_phrases):
+        return True
+
+    # If it contains task words, it's not casual
+    if any(w in words for w in _TASK_WORDS):
+        return False
+
+    # If it contains handoff phrases, it's not casual
+    if any(phrase in text for phrase in _HANDOFF_PHRASES):
+        return False
+
+    # If it's a simple question without task context, it's casual
+    simple_questions = {
+        "what", "how", "when", "where", "who", "why", "which", "is", "are", "do", "does"
+    }
+
+    if any(word in simple_questions for word in words) and len(words) < 10:
+        return True
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Musa soul — loaded once, injected into every quick-chat call
 # ---------------------------------------------------------------------------
@@ -223,6 +265,82 @@ def _load_soul() -> str:
             else "You are Musa, Daniel's personal AI assistant for FDWA (Futuristic Digital Wealth Agency)."
         )
     return _SOUL_CACHE
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-loop decision system for tool call routing
+# ---------------------------------------------------------------------------
+# Decision cache to track user preferences for task routing
+_DECISION_CACHE: dict[str, dict[str, int]] = {}
+# Decision thresholds for when to ask user
+_DECISION_THRESHOLD = 3  # Ask user after 3 uncertain decisions
+_CONFIDENCE_THRESHOLD = 0.7  # Confidence level for automatic routing
+
+
+def _get_decision_key(message: str, chat_id: int) -> str:
+    """Generate a unique key for this type of decision based on message content."""
+    # Normalize message for decision tracking
+    normalized = message.strip().lower()
+    # Extract key phrases that indicate task type
+    key_phrases = []
+    for word in _TASK_WORDS:
+        if word in normalized:
+            key_phrases.append(word)
+
+    # If no task words, use message hash for uniqueness
+    if not key_phrases:
+        import hashlib
+        key_phrases = [hashlib.md5(normalized.encode()).hexdigest()[:8]]
+
+    return f"{chat_id}_{'_'.join(sorted(key_phrases))}"
+
+
+def _should_ask_user_for_decision(message: str, chat_id: int) -> bool:
+    """Determine if we should ask the user whether to handle this task or hand off."""
+    decision_key = _get_decision_key(message, chat_id)
+
+    # Initialize decision tracking if not exists
+    if decision_key not in _DECISION_CACHE:
+        _DECISION_CACHE[decision_key] = {"handle_self": 0, "handoff": 0, "uncertain": 0}
+
+    stats = _DECISION_CACHE[decision_key]
+    total_decisions = stats["handle_self"] + stats["handoff"] + stats["uncertain"]
+
+    # If we have strong preference based on history, don't ask
+    if total_decisions >= _DECISION_THRESHOLD:
+        handle_ratio = stats["handle_self"] / total_decisions
+        handoff_ratio = stats["handoff"] / total_decisions
+
+        # If we're confident based on history, auto-route
+        if max(handle_ratio, handoff_ratio) >= _CONFIDENCE_THRESHOLD:
+            return False
+
+    # Check if message clearly indicates user wants full agent
+    user_indicators = [
+        "use the full agent", "call the main agent", "escalate",
+        "i need the full system", "bring in the main ai", "use all tools"
+    ]
+
+    message_lower = message.lower()
+    if any(indicator in message_lower for indicator in user_indicators):
+        return False  # User explicitly wants handoff
+
+    # If message is ambiguous and we don't have enough history, ask
+    if total_decisions < _DECISION_THRESHOLD:
+        return True
+
+    return False
+
+
+def _record_decision(message: str, chat_id: int, decision: str) -> None:
+    """Record the outcome of a routing decision for future learning."""
+    decision_key = _get_decision_key(message, chat_id)
+
+    if decision_key not in _DECISION_CACHE:
+        _DECISION_CACHE[decision_key] = {"handle_self": 0, "handoff": 0, "uncertain": 0}
+
+    if decision in _DECISION_CACHE[decision_key]:
+        _DECISION_CACHE[decision_key][decision] += 1
 
 
 AGENT_ID: str = os.environ.get("DA_AGENT_ID", "default")
@@ -706,23 +824,77 @@ async def _run_agent(
 # Musa lightweight tool set (Cerebras tool loop — no LangGraph needed)
 # ---------------------------------------------------------------------------
 
-# Musa has TWO tools only — no web search (causes hallucination on non-web queries).
-# web_search removed: small LLMs call it for anything ("errors", "what's up", etc.)
-# If Musa genuinely needs web or system data, it calls handoff_to_agent.
+# Musa tools — lightweight versions for quick tasks so we don't need the
+# full LangGraph agent for simple lookups. Musa is the brain/soul and can
+# handle: web search, memory, chat history, time, URL fetch.
+# Only hands off to the full agent for multi-step tasks (email, posting, etc.)
 _MUSA_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "handoff_to_agent",
+            "name": "web_search",
             "description": (
-                "Pass this request to the full AI agent. Use this when the request needs "
-                "ANYTHING beyond casual conversation — system checks, errors, logs, tools, "
-                "APIs, files, web search, Gmail, GitHub, Sheets, social media, "
-                "memory lookup, LangSmith traces, or any real task. "
-                "If you are not 100% sure you can answer from your soul context alone, "
-                "call this immediately. Do NOT guess or make up answers."
+                "Search the web for current information. Use for: weather, news, "
+                "stock prices, scores, facts, anything needing real-time data. "
+                "Returns top 3 results with titles, URLs, and snippets."
             ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_memory",
+            "description": (
+                "Search the agent's long-term memory for past conversations, saved facts, "
+                "user preferences, and previous task results. Use when the user asks: "
+                "'what did we discuss', 'remember when', 'what did the agent do', "
+                "'check memory', or references past work."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to search for in memory"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_memory",
+            "description": (
+                "Save information to long-term memory. Use when user says 'remember this', "
+                "'save this', 'note that', or when you learn something important."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "What to remember"},
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Fetch and read the content of a web page URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to fetch"},
+                },
+                "required": ["url"],
+            },
         },
     },
     {
@@ -730,6 +902,20 @@ _MUSA_TOOLS = [
         "function": {
             "name": "get_time",
             "description": "Get the current date and time.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "handoff_to_agent",
+            "description": (
+                "Pass to the full AI agent for HEAVY tasks only. Use ONLY for: "
+                "sending emails, posting to social media, creating spreadsheets, "
+                "GitHub operations, multi-step workflows, code execution, file operations, "
+                "or anything needing Composio integrations (Gmail, Sheets, etc.). "
+                "Do NOT use for: web search, memory lookup, simple questions — handle those yourself."
+            ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -790,6 +976,116 @@ async def _execute_musa_tool(name: str, args: dict) -> str:
             text = _re.sub(r"<[^>]+>", " ", resp.text)
             text = _re.sub(r"\s+", " ", text).strip()
             return text[:1500]
+
+        if name == "search_memory":
+            query = args.get("query", "")
+            if not query:
+                return "No query provided."
+            # Try Mem0 first (semantic), then AstraDB (structured)
+            results_text = []
+            mem0_key = os.environ.get("MEM0_API_KEY", "")
+            if mem0_key:
+                try:
+                    import json as _json
+                    body = _json.dumps({
+                        "query": query,
+                        "filters": {"AND": [{"user_id": "default"}]},
+                        "limit": 5,
+                    })
+                    resp = await asyncio.to_thread(
+                        requests.post,
+                        "https://api.mem0.ai/v2/memories/search/",
+                        data=body,
+                        headers={
+                            "Authorization": f"Token {mem0_key}",
+                            "Content-Type": "application/json",
+                        },
+                        timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        hits = resp.json().get("results", [])
+                        for h in hits:
+                            mem = h.get("memory", "")
+                            score = h.get("score", "")
+                            created = h.get("created_at", "")[:10]
+                            if mem:
+                                results_text.append(f"[{created}] {mem} (relevance: {score})")
+                except Exception as exc:
+                    results_text.append(f"(Mem0 error: {exc})")
+
+            astra_key = os.environ.get("ASTRA_DB_API_KEY", "")
+            astra_endpoint = os.environ.get("ASTRA_DB_ENDPOINT", "")
+            if astra_key and astra_endpoint:
+                try:
+                    from astrapy import DataAPIClient
+                    client = DataAPIClient()
+                    db = client.get_database(astra_endpoint, token=astra_key)
+                    coll = db.get_collection("agent_memory")
+                    docs = list(coll.find({"user_id": "default"}, limit=5))
+                    for d in docs:
+                        content = d.get("content", "")
+                        cat = d.get("category", "")
+                        created = d.get("created_at", "")[:10]
+                        if content:
+                            results_text.append(f"[{created}] [{cat}] {content}")
+                except Exception as exc:
+                    results_text.append(f"(AstraDB error: {exc})")
+
+            if not results_text:
+                return "No memories found for that query."
+            return f"Found {len(results_text)} memories:\n\n" + "\n".join(results_text)
+
+        if name == "save_memory":
+            content = args.get("content", "")
+            if not content:
+                return "No content provided."
+            saved_to = []
+            mem0_key = os.environ.get("MEM0_API_KEY", "")
+            if mem0_key:
+                try:
+                    import json as _json
+                    body = _json.dumps({
+                        "messages": [{"role": "user", "content": content}],
+                        "user_id": "default",
+                    })
+                    resp = await asyncio.to_thread(
+                        requests.post,
+                        "https://api.mem0.ai/v2/memories/",
+                        data=body,
+                        headers={
+                            "Authorization": f"Token {mem0_key}",
+                            "Content-Type": "application/json",
+                        },
+                        timeout=10,
+                    )
+                    if resp.status_code in (200, 201):
+                        saved_to.append("Mem0")
+                except Exception:
+                    pass
+
+            astra_key = os.environ.get("ASTRA_DB_API_KEY", "")
+            astra_endpoint = os.environ.get("ASTRA_DB_ENDPOINT", "")
+            if astra_key and astra_endpoint:
+                try:
+                    from astrapy import DataAPIClient
+                    from datetime import datetime, timezone
+                    client = DataAPIClient()
+                    db = client.get_database(astra_endpoint, token=astra_key)
+                    coll = db.get_collection("agent_memory")
+                    coll.insert_one({
+                        "content": content,
+                        "user_id": "default",
+                        "category": "general",
+                        "type": "memory",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    saved_to.append("AstraDB")
+                except Exception:
+                    pass
+
+            if saved_to:
+                return f"Saved to {', '.join(saved_to)}: {content[:100]}"
+            return "Could not save — no memory backend configured."
 
     except Exception as exc:
         return f"Tool error: {exc}"
@@ -897,18 +1193,11 @@ async def _quick_chat(message: str) -> tuple[str, bool]:
                 if text is None:
                     return ("", True)
         else:
-            # Non-Ollama fallback (Cerebras, Mistral, etc.)
-            from langchain.chat_models import init_chat_model
-            from langchain_core.messages import HumanMessage
-            from langchain_core.messages import SystemMessage as SM
-            parts = CHAT_MODEL.split(":", 1)
-            llm = (
-                init_chat_model(parts[1], model_provider=parts[0])
-                if len(parts) == 2
-                else init_chat_model(CHAT_MODEL)
-            )
-            r = await llm.ainvoke([SM(content=soul), HumanMessage(content=message)])
-            text = str(r.content).strip()
+            # Non-Ollama: use Cerebras tool loop (has web_search, memory, etc.)
+            # This gives Musa full tool capabilities regardless of chat model.
+            text = await _cerebras_chat(message, soul)
+            if text is None:
+                return ("", True)  # fallback failed → hand off
 
         if not text:
             return ("", True)
@@ -1300,19 +1589,74 @@ class HeadlessApp:
                 emoji, _ = _MODE_REGISTRY.get(active_mode, ("🎭", active_mode))
                 await _progress(f"{emoji} {active_mode.title()} mode active")
 
-            # ── Musa quick-chat routing ──────────────────────────────────────
+            # ── Musa quick-chat routing with human-in-the-loop ──────────────────────────────────────
             if active_mode == "default" and not _needs_full_agent(message) and CHAT_MODEL != MODEL:
                 logger.info("Musa routing (model=%s): %.60s", CHAT_MODEL, message)
                 await _progress("💬 Musa (quick-chat)…")
-                musa_reply, handoff = await _quick_chat(message)
-                if not handoff:
-                    logger.info("Musa reply to chat_id=%d: %.80s", telegram_chat_id, musa_reply)
-                    self._tg.deliver_reply(telegram_chat_id, musa_reply)
-                    return
-                logger.info("Musa HANDOFF → full agent for chat_id=%d", telegram_chat_id)
-                # Show Musa's natural handoff phrase ("On it 🔄") if it produced one,
-                # otherwise fall back to a generic step.
-                await _progress(musa_reply or "🔄 On it…")
+
+                # Check if we should ask user for decision
+                if _should_ask_user_for_decision(message, telegram_chat_id):
+                    # Ask user how to handle this task
+                    question = (
+                        f"❓ <b>How would you like me to handle this?</b>\n\n"
+                        f"<i>{message[:100]}</i>\n\n"
+                        f"Choose one:\n"
+                        f"• <b>Handle it myself</b> — I'll use my quick tools (web search, memory, etc.)\n"
+                        f"• <b>Hand off to full agent</b> — Use the complete system with all capabilities\n\n"
+                        f"This helps me learn your preferences for similar requests in the future."
+                    )
+
+                    # Send question with inline keyboard
+                    await asyncio.to_thread(
+                        self._tg.send_question_with_keyboard,
+                        telegram_chat_id,
+                        question,
+                        ["Handle it myself", "Hand off to full agent"]
+                    )
+
+                    # Wait for user response
+                    loop = asyncio.get_running_loop()
+                    decision_future: asyncio.Future = loop.create_future()
+                    self._pending_interrupts[telegram_chat_id] = decision_future
+
+                    try:
+                        user_choice = await asyncio.wait_for(asyncio.shield(decision_future), timeout=120.0)  # 2 minute timeout
+                        user_choice = user_choice.lower()
+
+                        # Record the decision for future learning
+                        if "handle it myself" in user_choice:
+                            _record_decision(message, telegram_chat_id, "handle_self")
+                            # Continue with Musa
+                            musa_reply, handoff = await _quick_chat(message)
+                            if not handoff:
+                                logger.info("Musa reply to chat_id=%d: %.80s", telegram_chat_id, musa_reply)
+                                self._tg.deliver_reply(telegram_chat_id, musa_reply)
+                                return
+                            logger.info("Musa HANDOFF → full agent for chat_id=%d", telegram_chat_id)
+                            await _progress(musa_reply or "🔄 On it…")
+                        else:
+                            # User chose handoff
+                            _record_decision(message, telegram_chat_id, "handoff")
+                            logger.info("User chose handoff for chat_id=%d", telegram_chat_id)
+                            await _progress("🔄 Handing off to full agent…")
+                    except asyncio.TimeoutError:
+                        # Default to handoff if user doesn't respond
+                        _record_decision(message, telegram_chat_id, "uncertain")
+                        logger.info("User timeout, defaulting to handoff for chat_id=%d", telegram_chat_id)
+                        await _progress("🔄 Handing off to full agent (no response)…")
+                    finally:
+                        self._pending_interrupts.pop(telegram_chat_id, None)
+                else:
+                    # No need to ask user, proceed with Musa
+                    musa_reply, handoff = await _quick_chat(message)
+                    if not handoff:
+                        logger.info("Musa reply to chat_id=%d: %.80s", telegram_chat_id, musa_reply)
+                        self._tg.deliver_reply(telegram_chat_id, musa_reply)
+                        return
+                    logger.info("Musa HANDOFF → full agent for chat_id=%d", telegram_chat_id)
+                    # Show Musa's natural handoff phrase ("On it 🔄") if it produced one,
+                    # otherwise fall back to a generic step.
+                    await _progress(musa_reply or "🔄 On it…")
             else:
                 await _progress("🤖 Starting…")
 
