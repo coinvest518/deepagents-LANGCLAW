@@ -364,6 +364,9 @@ from deepagents_cli.telegram_integration import (  # noqa: E402
     is_telegram_enabled,
 )
 
+# Import Quick Chat module for standalone functionality
+from quick_chat import handle_quick_chat, should_use_quick_chat
+
 
 def _clear_webhook() -> None:
     """Call deleteWebhook at startup to release any stuck long-poll connection.
@@ -1589,10 +1592,10 @@ class HeadlessApp:
                 emoji, _ = _MODE_REGISTRY.get(active_mode, ("🎭", active_mode))
                 await _progress(f"{emoji} {active_mode.title()} mode active")
 
-            # ── Musa quick-chat routing with human-in-the-loop ──────────────────────────────────────
-            if active_mode == "default" and not _needs_full_agent(message) and CHAT_MODEL != MODEL:
-                logger.info("Musa routing (model=%s): %.60s", CHAT_MODEL, message)
-                await _progress("💬 Musa (quick-chat)…")
+            # ── Quick Chat routing with human-in-the-loop ──────────────────────────────────────
+            if active_mode == "default" and should_use_quick_chat(message) and CHAT_MODEL != MODEL:
+                logger.info("Quick Chat routing (model=%s): %.60s", CHAT_MODEL, message)
+                await _progress("💬 Quick Chat…")
 
                 # Check if we should ask user for decision
                 if _should_ask_user_for_decision(message, telegram_chat_id):
@@ -1626,14 +1629,14 @@ class HeadlessApp:
                         # Record the decision for future learning
                         if "handle it myself" in user_choice:
                             _record_decision(message, telegram_chat_id, "handle_self")
-                            # Continue with Musa
-                            musa_reply, handoff = await _quick_chat(message)
+                            # Continue with Quick Chat
+                            quick_reply, handoff = await handle_quick_chat(message)
                             if not handoff:
-                                logger.info("Musa reply to chat_id=%d: %.80s", telegram_chat_id, musa_reply)
-                                self._tg.deliver_reply(telegram_chat_id, musa_reply)
+                                logger.info("Quick Chat reply to chat_id=%d: %.80s", telegram_chat_id, quick_reply)
+                                self._tg.deliver_reply(telegram_chat_id, quick_reply)
                                 return
-                            logger.info("Musa HANDOFF → full agent for chat_id=%d", telegram_chat_id)
-                            await _progress(musa_reply or "🔄 On it…")
+                            logger.info("Quick Chat HANDOFF → full agent for chat_id=%d", telegram_chat_id)
+                            await _progress(quick_reply or "🔄 On it…")
                         else:
                             # User chose handoff
                             _record_decision(message, telegram_chat_id, "handoff")
@@ -1647,16 +1650,16 @@ class HeadlessApp:
                     finally:
                         self._pending_interrupts.pop(telegram_chat_id, None)
                 else:
-                    # No need to ask user, proceed with Musa
-                    musa_reply, handoff = await _quick_chat(message)
+                    # No need to ask user, proceed with Quick Chat
+                    quick_reply, handoff = await handle_quick_chat(message)
                     if not handoff:
-                        logger.info("Musa reply to chat_id=%d: %.80s", telegram_chat_id, musa_reply)
-                        self._tg.deliver_reply(telegram_chat_id, musa_reply)
+                        logger.info("Quick Chat reply to chat_id=%d: %.80s", telegram_chat_id, quick_reply)
+                        self._tg.deliver_reply(telegram_chat_id, quick_reply)
                         return
-                    logger.info("Musa HANDOFF → full agent for chat_id=%d", telegram_chat_id)
-                    # Show Musa's natural handoff phrase ("On it 🔄") if it produced one,
+                    logger.info("Quick Chat HANDOFF → full agent for chat_id=%d", telegram_chat_id)
+                    # Show Quick Chat's natural handoff phrase ("On it 🔄") if it produced one,
                     # otherwise fall back to a generic step.
-                    await _progress(musa_reply or "🔄 On it…")
+                    await _progress(quick_reply or "🔄 On it…")
             else:
                 await _progress("🤖 Starting…")
 
@@ -2183,9 +2186,9 @@ async def start_api_server(agent: object) -> None:
 
         async with _api_locks[thread_id]:
             try:
-                if _is_casual(message) and CHAT_MODEL != MODEL:
-                    response = await _quick_chat(message)
-                    if response:
+                if should_use_quick_chat(message) and CHAT_MODEL != MODEL:
+                    response, handoff = await handle_quick_chat(message)
+                    if not handoff:
                         task_store.done(task_id, response)
                         conversation_store.append(thread_id, "agent", response)
                         return web.json_response({
