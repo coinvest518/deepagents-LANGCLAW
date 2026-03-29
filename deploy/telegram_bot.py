@@ -149,26 +149,6 @@ def _pick_chat_model() -> str:
 
 CHAT_MODEL: str = _pick_chat_model()
 
-# Action verbs / nouns that clearly signal a task needing the full agent.
-# Keep this list tight — generic words cause casual questions to route to full agent.
-_TASK_WORDS = frozenset({
-    # Clear task verbs
-    "find", "search", "create", "write", "send",
-    "list", "check", "update", "delete", "run",
-    "fetch", "save", "add", "remove", "set", "deploy", "push",
-    "generate", "summarize", "analyze", "fix", "debug",
-    "install", "download", "upload", "convert", "translate", "edit",
-    "rename", "move", "copy", "post", "tweet", "email",
-    "schedule", "automate", "test", "pull", "clone",
-    # Service nouns — any mention means needs API
-    "gmail", "github", "sheets", "spreadsheet", "drive", "docs",
-    "slack", "notion", "dropbox", "twitter", "linkedin", "instagram",
-    "facebook", "youtube", "serpapi", "analytics",
-    "calendar", "airtable",
-    # System queries that need the full agent (not Musa)
-    "trace", "langsmith", "dashboard",
-})
-
 # Phrases that mean "I'm handing this off" — Musa says these when escalating.
 # Detecting them: (a) returns (text, True) so user sees Musa's reply, AND
 # (b) triggers real code-level handoff to run the full agent in background.
@@ -192,63 +172,6 @@ _HANDOFF_PHRASES = (
     "need to use the",
 )
 
-
-def _needs_full_agent(text: str) -> bool:
-    """Return True when message clearly needs tools — skip Musa, go to full agent."""
-    lower = text.strip().lower()
-    words = lower.split()
-    return (
-        len(text.strip()) > 200
-        or any(w in words for w in _TASK_WORDS)
-        or any(phrase in lower for phrase in _HANDOFF_PHRASES)
-    )
-
-
-def _is_casual(message: str) -> bool:
-    """Determine if a message is casual chat suitable for quick response.
-
-    Returns True for:
-    - Short messages (< 100 chars)
-    - Greetings and casual questions
-    - Simple factual queries that don't need multi-step workflows
-    - Messages that don't contain task words or service nouns
-    """
-    text = message.strip().lower()
-    words = text.split()
-
-    # Short messages are likely casual
-    if len(text) < 100:
-        return True
-
-    # Greetings and casual phrases
-    casual_phrases = {
-        "hello", "hi", "hey", "how are you", "howdy", "good morning",
-        "good afternoon", "good evening", "what's up", "sup", "yo",
-        "how's it going", "how are things", "what's new", "what's happening"
-    }
-
-    if any(phrase in text for phrase in casual_phrases):
-        return True
-
-    # If it contains task words, it's not casual
-    if any(w in words for w in _TASK_WORDS):
-        return False
-
-    # If it contains handoff phrases, it's not casual
-    if any(phrase in text for phrase in _HANDOFF_PHRASES):
-        return False
-
-    # If it's a simple question without task context, it's casual
-    simple_questions = {
-        "what", "how", "when", "where", "who", "why", "which", "is", "are", "do", "does"
-    }
-
-    if any(word in simple_questions for word in words) and len(words) < 10:
-        return True
-
-    return False
-
-
 # ---------------------------------------------------------------------------
 # Musa soul — loaded once, injected into every quick-chat call
 # ---------------------------------------------------------------------------
@@ -267,80 +190,6 @@ def _load_soul() -> str:
     return _SOUL_CACHE
 
 
-# ---------------------------------------------------------------------------
-# Human-in-the-loop decision system for tool call routing
-# ---------------------------------------------------------------------------
-# Decision cache to track user preferences for task routing
-_DECISION_CACHE: dict[str, dict[str, int]] = {}
-# Decision thresholds for when to ask user
-_DECISION_THRESHOLD = 3  # Ask user after 3 uncertain decisions
-_CONFIDENCE_THRESHOLD = 0.7  # Confidence level for automatic routing
-
-
-def _get_decision_key(message: str, chat_id: int) -> str:
-    """Generate a unique key for this type of decision based on message content."""
-    # Normalize message for decision tracking
-    normalized = message.strip().lower()
-    # Extract key phrases that indicate task type
-    key_phrases = []
-    for word in _TASK_WORDS:
-        if word in normalized:
-            key_phrases.append(word)
-
-    # If no task words, use message hash for uniqueness
-    if not key_phrases:
-        import hashlib
-        key_phrases = [hashlib.md5(normalized.encode()).hexdigest()[:8]]
-
-    return f"{chat_id}_{'_'.join(sorted(key_phrases))}"
-
-
-def _should_ask_user_for_decision(message: str, chat_id: int) -> bool:
-    """Determine if we should ask the user whether to handle this task or hand off."""
-    decision_key = _get_decision_key(message, chat_id)
-
-    # Initialize decision tracking if not exists
-    if decision_key not in _DECISION_CACHE:
-        _DECISION_CACHE[decision_key] = {"handle_self": 0, "handoff": 0, "uncertain": 0}
-
-    stats = _DECISION_CACHE[decision_key]
-    total_decisions = stats["handle_self"] + stats["handoff"] + stats["uncertain"]
-
-    # If we have strong preference based on history, don't ask
-    if total_decisions >= _DECISION_THRESHOLD:
-        handle_ratio = stats["handle_self"] / total_decisions
-        handoff_ratio = stats["handoff"] / total_decisions
-
-        # If we're confident based on history, auto-route
-        if max(handle_ratio, handoff_ratio) >= _CONFIDENCE_THRESHOLD:
-            return False
-
-    # Check if message clearly indicates user wants full agent
-    user_indicators = [
-        "use the full agent", "call the main agent", "escalate",
-        "i need the full system", "bring in the main ai", "use all tools"
-    ]
-
-    message_lower = message.lower()
-    if any(indicator in message_lower for indicator in user_indicators):
-        return False  # User explicitly wants handoff
-
-    # If message is ambiguous and we don't have enough history, ask
-    if total_decisions < _DECISION_THRESHOLD:
-        return True
-
-    return False
-
-
-def _record_decision(message: str, chat_id: int, decision: str) -> None:
-    """Record the outcome of a routing decision for future learning."""
-    decision_key = _get_decision_key(message, chat_id)
-
-    if decision_key not in _DECISION_CACHE:
-        _DECISION_CACHE[decision_key] = {"handle_self": 0, "handoff": 0, "uncertain": 0}
-
-    if decision in _DECISION_CACHE[decision_key]:
-        _DECISION_CACHE[decision_key][decision] += 1
 
 
 AGENT_ID: str = os.environ.get("DA_AGENT_ID", "default")
@@ -1163,7 +1012,7 @@ async def _cerebras_chat(message: str, soul: str) -> str | None:
 async def _quick_chat(message: str) -> tuple[str, bool]:
     """Ask Musa (Ollama) with soul context. Returns (reply, handoff).
 
-    Routing is handled by _needs_full_agent() before this is called.
+    Routing is handled by should_use_quick_chat() before this is called.
     Musa just answers with personality and FDWA context.
     Falls back to handoff=True on any error so nothing is dropped.
     """
@@ -1592,74 +1441,32 @@ class HeadlessApp:
                 emoji, _ = _MODE_REGISTRY.get(active_mode, ("🎭", active_mode))
                 await _progress(f"{emoji} {active_mode.title()} mode active")
 
-            # ── Quick Chat routing with human-in-the-loop ──────────────────────────────────────
-            if active_mode == "default" and should_use_quick_chat(message) and CHAT_MODEL != MODEL:
+            # ── Quick Chat routing ─────────────────────────────────────────
+            # Simple two-path decision:
+            #   • Quick Chat can handle it → Musa responds instantly
+            #     (if Musa decides to hand off, it says so naturally and
+            #      the full agent picks up automatically)
+            #   • Quick Chat can't handle it → full agent directly
+            #
+            # No decision prompts, no "how would you like me to handle
+            # this?" keyboards. Musa talks or the agent works. Clean.
+            _use_quick = (
+                active_mode == "default"
+                and should_use_quick_chat(message)
+            )
+
+            if _use_quick:
                 logger.info("Quick Chat routing (model=%s): %.60s", CHAT_MODEL, message)
                 await _progress("💬 Quick Chat…")
 
-                # Check if we should ask user for decision
-                if _should_ask_user_for_decision(message, telegram_chat_id):
-                    # Ask user how to handle this task
-                    question = (
-                        f"❓ <b>How would you like me to handle this?</b>\n\n"
-                        f"<i>{message[:100]}</i>\n\n"
-                        f"Choose one:\n"
-                        f"• <b>Handle it myself</b> — I'll use my quick tools (web search, memory, etc.)\n"
-                        f"• <b>Hand off to full agent</b> — Use the complete system with all capabilities\n\n"
-                        f"This helps me learn your preferences for similar requests in the future."
-                    )
-
-                    # Send question with inline keyboard
-                    await asyncio.to_thread(
-                        self._tg.send_question_with_keyboard,
-                        telegram_chat_id,
-                        question,
-                        ["Handle it myself", "Hand off to full agent"]
-                    )
-
-                    # Wait for user response
-                    loop = asyncio.get_running_loop()
-                    decision_future: asyncio.Future = loop.create_future()
-                    self._pending_interrupts[telegram_chat_id] = decision_future
-
-                    try:
-                        user_choice = await asyncio.wait_for(asyncio.shield(decision_future), timeout=120.0)  # 2 minute timeout
-                        user_choice = user_choice.lower()
-
-                        # Record the decision for future learning
-                        if "handle it myself" in user_choice:
-                            _record_decision(message, telegram_chat_id, "handle_self")
-                            # Continue with Quick Chat
-                            quick_reply, handoff = await handle_quick_chat(message)
-                            if not handoff:
-                                logger.info("Quick Chat reply to chat_id=%d: %.80s", telegram_chat_id, quick_reply)
-                                self._tg.deliver_reply(telegram_chat_id, quick_reply)
-                                return
-                            logger.info("Quick Chat HANDOFF → full agent for chat_id=%d", telegram_chat_id)
-                            await _progress(quick_reply or "🔄 On it…")
-                        else:
-                            # User chose handoff
-                            _record_decision(message, telegram_chat_id, "handoff")
-                            logger.info("User chose handoff for chat_id=%d", telegram_chat_id)
-                            await _progress("🔄 Handing off to full agent…")
-                    except asyncio.TimeoutError:
-                        # Default to handoff if user doesn't respond
-                        _record_decision(message, telegram_chat_id, "uncertain")
-                        logger.info("User timeout, defaulting to handoff for chat_id=%d", telegram_chat_id)
-                        await _progress("🔄 Handing off to full agent (no response)…")
-                    finally:
-                        self._pending_interrupts.pop(telegram_chat_id, None)
-                else:
-                    # No need to ask user, proceed with Quick Chat
-                    quick_reply, handoff = await handle_quick_chat(message)
-                    if not handoff:
-                        logger.info("Quick Chat reply to chat_id=%d: %.80s", telegram_chat_id, quick_reply)
-                        self._tg.deliver_reply(telegram_chat_id, quick_reply)
-                        return
-                    logger.info("Quick Chat HANDOFF → full agent for chat_id=%d", telegram_chat_id)
-                    # Show Quick Chat's natural handoff phrase ("On it 🔄") if it produced one,
-                    # otherwise fall back to a generic step.
-                    await _progress(quick_reply or "🔄 On it…")
+                quick_reply, handoff = await handle_quick_chat(message)
+                if not handoff and quick_reply:
+                    logger.info("Quick Chat reply to chat_id=%d: %.80s", telegram_chat_id, quick_reply)
+                    self._tg.deliver_reply(telegram_chat_id, quick_reply)
+                    return
+                # Musa handed off → show its message, then full agent continues
+                logger.info("Quick Chat HANDOFF → full agent for chat_id=%d", telegram_chat_id)
+                await _progress(quick_reply or "🔄 On it…")
             else:
                 await _progress("🤖 Starting…")
 
