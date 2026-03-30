@@ -23,6 +23,7 @@ async def test_quick_chat():
     print(f"Message: '{message}'")
     print(f"Should handle with Quick Chat: {should_handle}")
 
+    assert should_handle is True, "Casual greeting should be handled by Quick Chat"
     if should_handle:
         reply, should_handoff = await handle_quick_chat(message)
         print(f"Reply: {reply[:100]}{'...' if len(reply) > 100 else ''}")
@@ -47,6 +48,7 @@ async def test_quick_chat():
     print(f"Message: '{message}'")
     print(f"Should handle with Quick Chat: {should_handle}")
 
+    assert should_handle is False, "GitHub-style task should be escalated away from Quick Chat"
     if should_handle:
         reply, should_handoff = await handle_quick_chat(message)
         print(f"Reply: {reply[:100]}{'...' if len(reply) > 100 else ''}")
@@ -75,6 +77,11 @@ async def test_quick_chat():
         reply, should_handoff = await handle_quick_chat(message)
         print(f"Reply: {reply[:100]}{'...' if len(reply) > 100 else ''}")
         print(f"Should handoff to main agent: {should_handoff}")
+
+    # Verify normalization helper handles JSON payloads gracefully
+    from quick_chat import quick_chat
+    normalized = quick_chat._normalize_reply('{"message": {"content": "Hello there!"}}')
+    assert normalized == "Hello there!", "_normalize_reply should unwrap JSON-style payloads"
 
     print("\n" + "=" * 50)
     print("Quick Chat test completed!")

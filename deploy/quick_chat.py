@@ -42,7 +42,7 @@ try:
     from dotenv import load_dotenv
     load_dotenv(dotenv_path=_REPO / ".env", override=False)
 except ImportError:
-    pass
+    logging.getLogger("deepagents.quick_chat").debug("python-dotenv not installed; skipping .env load")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -319,7 +319,15 @@ class QuickChat:
         text = message.strip().lower()
         words = text.split()
 
-        # Short messages are likely casual
+        # If it contains task words, it's not casual
+        if any(w in words for w in _TASK_WORDS):
+            return False
+
+        # If it contains handoff phrases, it's not casual
+        if any(phrase in text for phrase in _HANDOFF_PHRASES):
+            return False
+
+        # Short messages are likely casual if they don't contain task markers
         if len(text) < 100:
             return True
 
@@ -637,6 +645,15 @@ class QuickChat:
 
                 if not tool_calls:
                     # No tool call — this is the final answer
+                    tool_result = await self._resolve_tool_call_response(resp.content)
+                    if tool_result is not None:
+                        return tool_result
+
+                    text = self._normalize_reply(resp.content)
+                    if text:
+                        logger.info("Quick Chat reply (iter=%d): %.80s", _iteration, text)
+                        return text
+
                     text = str(resp.content).strip()
                     if text:
                         logger.info("Quick Chat reply (iter=%d): %.80s", _iteration, text)
@@ -662,7 +679,28 @@ class QuickChat:
 
             # Exhausted iterations — ask for final answer without tools
             resp = await llm.ainvoke(msgs)
-            text = str(resp.content).strip()
+            tool_calls = getattr(resp, "tool_calls", None) or []
+            if tool_calls:
+                for tc in tool_calls:
+                    tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                    tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                    if isinstance(tc_args, str):
+                        try:
+                            tc_args = json.loads(tc_args)
+                        except Exception:
+                            tc_args = {}
+                    result = await self._execute_tool(tc_name, tc_args)
+                    if result == _QUICK_CHAT_HANDOFF_SENTINEL:
+                        logger.info("Quick Chat escalation called — final tool request requires handoff")
+                        return None
+                    return result
+
+            # If model output was a function call object, unbox and execute it.
+            tool_result = await self._resolve_tool_call_response(resp.content)
+            if tool_result is not None:
+                return tool_result
+
+            text = self._normalize_reply(resp.content)
             return text or None
 
         except ImportError as exc:
@@ -671,6 +709,78 @@ class QuickChat:
         except Exception as exc:
             logger.warning("Cerebras fallback failed: %s", exc)
             return None
+
+    def _normalize_reply(self, raw: Any) -> str:
+        """Normalize model output to safe plain text reply."""
+        text = ""
+
+        if raw is None:
+            return ""
+
+        if isinstance(raw, str):
+            text = raw
+        elif isinstance(raw, dict):
+            # Prefer common fields from API-like objects
+            text = (
+                raw.get("text")
+                or raw.get("content")
+                or raw.get("message", {}).get("content")
+                or raw.get("response")
+                or json.dumps(raw)
+            )
+        else:
+            text = str(raw)
+
+        text = text.strip()
+
+        # If the response body is a JSON string embedded in text, parse and extract politely.
+        if text.startswith("{") or text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    text = (
+                        parsed.get("message", {}).get("content")
+                        or parsed.get("content")
+                        or parsed.get("text")
+                        or parsed.get("response")
+                        or json.dumps(parsed)
+                    )
+                else:
+                    text = json.dumps(parsed)
+            except Exception:
+                # Keep original text when parse fails
+                pass
+
+        return str(text).strip()
+
+    async def _resolve_tool_call_response(self, raw: Any) -> Optional[str]:
+        """Detect a function-style tool call payload and execute it as a safe text response."""
+        payload = raw
+        if isinstance(raw, str):
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        # Ollama-like / LangChain tool call structure
+        if payload.get("type") == "function" or (payload.get("name") and payload.get("arguments")):
+            name = payload.get("name") or payload.get("function")
+            args = payload.get("parameters") or payload.get("arguments") or {}
+            if not name:
+                return None
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+            return await self._execute_tool(name, args)
+
+        return None
 
     async def _ollama_chat(self, message: str, soul: str) -> str | None:
         """Ollama local fallback for Quick Chat.
@@ -701,11 +811,37 @@ class QuickChat:
                 timeout=int(os.environ.get("OLLAMA_TIMEOUT", "20")),
             )
             if resp.status_code == 200:
-                text = resp.json().get("message", {}).get("content", "").strip()
-                return text
-            else:
-                logger.warning("Ollama returned %d — trying Cerebras fallback", resp.status_code)
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    payload = {}
+                raw_text = ""
+                if isinstance(payload, dict):
+                    raw_text = (
+                        payload.get("message", {}).get("content")
+                        or payload.get("content")
+                        or payload.get("text")
+                        or payload.get("response")
+                        or payload.get("results")
+                        or resp.text
+                    )
+                else:
+                    raw_text = str(payload)
+
+                potential_tool = payload if isinstance(payload, dict) else raw_text
+                tool_result = await self._resolve_tool_call_response(potential_tool)
+                if tool_result is not None:
+                    return tool_result
+
+                normalized = self._normalize_reply(raw_text)
+                if normalized:
+                    return normalized
+
+                logger.warning("Ollama returned empty text or unknown format; payload=%s", payload)
                 return await self._cerebras_chat(message, soul)
+
+            logger.warning("Ollama returned %d — trying Cerebras fallback", resp.status_code)
+            return await self._cerebras_chat(message, soul)
         except Exception as exc:
             logger.warning("Ollama failed: %s", exc)
             return await self._cerebras_chat(message, soul)
