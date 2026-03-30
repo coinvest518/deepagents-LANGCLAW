@@ -169,57 +169,147 @@ def web_search(  # noqa: ANN201 - Tavily-first web search adapter
 def fetch_url(url: str, timeout: int = 30) -> dict[str, Any]:
     """Fetch content from a URL and convert HTML to markdown format.
 
-    This tool fetches web page content and converts it to clean markdown text,
-    making it easy to read and process HTML content. After receiving the markdown,
-    you MUST synthesize the information into a natural, helpful response for the user.
+    Tries multiple providers in order until one succeeds:
+      1. Direct HTTP fetch (requests + markdownify) — fastest
+      2. Firecrawl — handles bot-detection, JS-light pages
+      3. HyperBrowser — handles JS-heavy / SPA pages
+      4. Tavily extract — last-resort via search API
+
+    After receiving the content, you MUST synthesize the information into a
+    natural, helpful response for the user. NEVER show raw markdown unless asked.
 
     Args:
         url: The URL to fetch (must be a valid HTTP/HTTPS URL)
         timeout: Request timeout in seconds (default: 30)
 
     Returns:
-        Dictionary containing:
-        - success: Whether the request succeeded
-        - url: The final URL after redirects
-        - markdown_content: The page content converted to markdown
-        - status_code: HTTP status code
-        - content_length: Length of the markdown content in characters
-
-    IMPORTANT: After using this tool:
-    1. Read through the markdown content
-    2. Extract relevant information that answers the user's question
-    3. Synthesize this into a clear, natural language response
-    4. NEVER show the raw markdown to the user unless specifically requested
+        Dictionary with ``markdown_content``, ``url``, ``provider`` (which
+        provider succeeded), and ``content_length``.  On total failure returns
+        an ``error`` key explaining what each provider tried.
     """
+    from urllib.parse import urlparse
+
+    errors: dict[str, str] = {}
+
+    # ── Provider 1: direct HTTP + markdownify ────────────────────────────────
     try:
         import requests
         from markdownify import markdownify
-    except ImportError as exc:
-        return {
-            "error": f"Required package not installed: {exc.name}. "
-            "Install with: pip install 'deepagents[cli]'",
-            "url": url,
-        }
 
-    try:
         response = requests.get(
             url,
             timeout=timeout,
             headers={"User-Agent": "Mozilla/5.0 (compatible; DeepAgents/1.0)"},
         )
         response.raise_for_status()
+        md = markdownify(response.text)
+        if md and len(md.strip()) > 100:
+            return {
+                "url": str(response.url),
+                "markdown_content": md,
+                "status_code": response.status_code,
+                "content_length": len(md),
+                "provider": "direct",
+            }
+        errors["direct"] = f"status {response.status_code}, content too short ({len(md)} chars)"
+    except Exception as e:
+        errors["direct"] = str(e)
 
-        # Convert HTML content to markdown
-        markdown_content = markdownify(response.text)
+    # ── Provider 2: Firecrawl ────────────────────────────────────────────────
+    try:
+        from deepagents_cli.config import settings as _settings
+        fc_key = getattr(_settings, "firecrawl_api_key", None)
+        if fc_key:
+            import requests as _req
+            parsed = urlparse(url)
+            domain = parsed.netloc or parsed.path.split("/")[0]
+            resp = _req.post(
+                "https://api.firecrawl.dev/v1/scrape",
+                headers={"Authorization": f"Bearer {fc_key}", "Content-Type": "application/json"},
+                json={"url": url, "formats": ["markdown"]},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json().get("data", {})
+                md = data.get("markdown") or data.get("content") or ""
+                if md and len(md.strip()) > 100:
+                    return {
+                        "url": url,
+                        "markdown_content": md,
+                        "status_code": 200,
+                        "content_length": len(md),
+                        "provider": "firecrawl",
+                    }
+                errors["firecrawl"] = f"empty content ({len(md)} chars)"
+            else:
+                errors["firecrawl"] = f"HTTP {resp.status_code}: {resp.text[:200]}"
+        else:
+            errors["firecrawl"] = "no FIRECRAWL_API_KEY"
+    except Exception as e:
+        errors["firecrawl"] = str(e)
 
-        return {
-            "url": str(response.url),
-            "markdown_content": markdown_content,
-            "status_code": response.status_code,
-            "content_length": len(markdown_content),
-        }
-    except requests.exceptions.RequestException as e:
-        return {"error": f"Fetch URL error: {e!s}", "url": url}
+    # ── Provider 3: HyperBrowser ─────────────────────────────────────────────
+    try:
+        from deepagents_cli.config import settings as _settings
+        hb_key = getattr(_settings, "hyperbrowser_api_key", None)
+        if hb_key:
+            import requests as _req
+            parsed = urlparse(url)
+            domain = (parsed.netloc or parsed.path.split("/")[0]).replace("www.", "")
+            from deepagents_cli.providers import hyperbrowser as _hb
+            result = _hb.search_site(domain, query=url, max_results=1)
+            results = result.get("results", [])
+            if results:
+                content = results[0].get("content", "")
+                if content and len(content.strip()) > 100:
+                    return {
+                        "url": url,
+                        "markdown_content": content,
+                        "status_code": 200,
+                        "content_length": len(content),
+                        "provider": "hyperbrowser",
+                    }
+            errors["hyperbrowser"] = f"empty content (results={len(results)})"
+        else:
+            errors["hyperbrowser"] = "no HYPERBROWSER_API_KEY"
+    except Exception as e:
+        errors["hyperbrowser"] = str(e)
+
+    # ── Provider 4: Tavily extract ───────────────────────────────────────────
+    try:
+        from deepagents_cli.providers import tavily as _tav
+        from deepagents_cli.config import settings as _settings
+        if getattr(_settings, "has_tavily", False):
+            client = _tav._get_client()
+            if client and hasattr(client, "extract"):
+                extracted = client.extract(url, include_raw_content=True)
+                content = ""
+                if isinstance(extracted, dict):
+                    content = extracted.get("content") or extracted.get("markdown") or extracted.get("raw_content") or ""
+                    if not content and extracted.get("results"):
+                        content = extracted["results"][0].get("raw_content") or extracted["results"][0].get("content") or ""
+                else:
+                    content = getattr(extracted, "content", None) or getattr(extracted, "raw_content", "") or ""
+                if content and len(str(content).strip()) > 100:
+                    return {
+                        "url": url,
+                        "markdown_content": str(content),
+                        "status_code": 200,
+                        "content_length": len(str(content)),
+                        "provider": "tavily_extract",
+                    }
+            errors["tavily"] = "no content extracted"
+        else:
+            errors["tavily"] = "no TAVILY_API_KEY"
+    except Exception as e:
+        errors["tavily"] = str(e)
+
+    # ── All providers failed ─────────────────────────────────────────────────
+    return {
+        "error": "All providers failed to fetch URL",
+        "url": url,
+        "provider_errors": errors,
+    }
 
 
 def hyperbrowser_scrape(site_domain: str, *, query: str | None = None, max_results: int = 5) -> dict[str, Any]:

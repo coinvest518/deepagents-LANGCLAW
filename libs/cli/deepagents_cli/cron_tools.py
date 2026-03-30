@@ -46,6 +46,22 @@ def create_cron_job(name: str, schedule: str, prompt: str) -> str:
     Returns:
         Confirmation string with the job ID and next scheduled run time.
     """
+    # Deduplication: if a job with this name already exists, return it instead
+    # of creating a duplicate.  This prevents loop-prone LLMs from registering
+    # the same job dozens of times when they keep retrying after a success.
+    existing = [j for j in _store.list_jobs() if j.name == name]
+    if existing:
+        job = existing[0]
+        return (
+            f"Cron job '{name}' already exists — no duplicate created.\n"
+            f"  ID       : {job.id}\n"
+            f"  Name     : {job.name}\n"
+            f"  Schedule : {job.schedule}\n"
+            f"  Next run : {job.next_run}\n"
+            f"\nThe existing job is already scheduled. "
+            f"Use delete_cron_job('{job.id}') first if you want to replace it."
+        )
+
     try:
         job = _store.create_job(name=name, schedule=schedule, prompt=prompt)
     except ValueError as exc:

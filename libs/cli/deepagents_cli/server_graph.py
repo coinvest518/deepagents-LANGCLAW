@@ -58,11 +58,17 @@ def _build_tools(
     """
     from deepagents_cli.config import settings
     from deepagents_cli.cron_tools import CRON_TOOLS
-    from deepagents_cli.tools import fetch_url, http_request, web_search
+    from deepagents_cli.tools import fetch_url, firecrawl_scrape, http_request, hyperbrowser_scrape, web_search
 
     tools: list[Any] = [http_request, fetch_url, *CRON_TOOLS]
     if settings.has_tavily:
         tools.append(web_search)
+
+    # Register dedicated scraping tools when API keys are present
+    if os.environ.get("HYPERBROWSER_API_KEY"):
+        tools.append(hyperbrowser_scrape)
+    if os.environ.get("FIRECRAWL_API_KEY"):
+        tools.append(firecrawl_scrape)
 
     # Memory tools — search_memory, save_memory, search_database, save_to_database.
     # Gives the agent direct access to Mem0 (semantic memory) and AstraDB (structured data).

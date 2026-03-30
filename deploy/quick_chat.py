@@ -142,6 +142,48 @@ _QUICK_CHAT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_cron_jobs",
+            "description": (
+                "List all scheduled cron/recurring jobs. Use when the user asks "
+                "'what jobs are scheduled', 'show my cron jobs', 'what runs daily', "
+                "'check my scheduled tasks', or anything about recurring automation."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_skills",
+            "description": (
+                "List all available agent skills and integrations. Use when the user "
+                "asks 'what can you do', 'what skills do you have', 'what integrations "
+                "are available', 'list your tools', or 'what services are connected'."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_traces",
+            "description": (
+                "Fetch recent agent task traces from LangSmith. Use when the user asks "
+                "'check logs', 'show recent tasks', 'what did the agent do', "
+                "'check trace', 'show activity', or 'what happened recently'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Number of traces to return (default 5)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "escalate_to_main_agent",
             "description": (
                 "Pass to the main AI agent for HEAVY tasks only. Use ONLY for: "
@@ -320,8 +362,86 @@ class QuickChat:
                 return datetime.datetime.now().strftime("%A, %B %d, %Y at %H:%M:%S")
 
             if name == "check_system_status":
-                # Check if main agent is available
                 return "Main agent is available and ready to handle complex tasks."
+
+            if name == "list_cron_jobs":
+                try:
+                    from deepagents_cli.cron_store import CronStore
+                    store = CronStore()
+                    jobs = store.list_jobs()
+                    if not jobs:
+                        return "No cron jobs scheduled."
+                    lines = [f"Scheduled jobs ({len(jobs)} total):"]
+                    for j in jobs:
+                        status = "enabled" if j.enabled else "disabled"
+                        last = j.last_run[:10] if j.last_run else "never"
+                        lines.append(
+                            f"• [{j.id}] {j.name} — {j.schedule} — {status}\n"
+                            f"  Next: {j.next_run[:19]}  Last: {last}\n"
+                            f"  Prompt: {j.prompt[:80]}{'...' if len(j.prompt) > 80 else ''}"
+                        )
+                    return "\n".join(lines)
+                except Exception as exc:
+                    return f"Could not read cron jobs: {exc}"
+
+            if name == "list_skills":
+                skills = [
+                    "gmail — Send/read emails", "github — Repos, issues, PRs",
+                    "googlesheets — Read/write spreadsheets", "googledrive — File management",
+                    "notion — Pages and databases", "slack — Send messages",
+                    "twitter — Post tweets", "linkedin — Post updates",
+                    "instagram — Post content", "facebook — Post updates",
+                    "telegram_send — Send Telegram messages", "search-online — Web search",
+                    "knowledge-base — Ingest and search documents",
+                    "memory — Long-term agent memory (Mem0 + AstraDB)",
+                    "alchemy — Blockchain / wallet operations",
+                    "remotion — Render videos", "upload-post — Upload media",
+                    "browser-use — Browser automation", "dropbox — File storage",
+                    "google_analytics — Analytics reports",
+                    "skill-creator — Create new custom skills",
+                ]
+                return "Available skills:\n" + "\n".join(f"• {s}" for s in skills)
+
+            if name == "get_recent_traces":
+                limit = int(args.get("limit", 5))
+                ls_key = os.environ.get("LANGSMITH_API_KEY", "")
+                ls_project = os.environ.get("LANGSMITH_PROJECT", "deeperagents")
+                if not ls_key:
+                    return "LangSmith not configured (no LANGSMITH_API_KEY)."
+                try:
+                    # get session id
+                    resp = await asyncio.to_thread(
+                        requests.get,
+                        f"https://api.smith.langchain.com/api/v1/sessions?name={ls_project}",
+                        headers={"x-api-key": ls_key},
+                        timeout=10,
+                    )
+                    sessions = resp.json()
+                    if not sessions:
+                        return "No LangSmith project found."
+                    session_id = sessions[0]["id"]
+                    # query runs
+                    resp2 = await asyncio.to_thread(
+                        requests.post,
+                        "https://api.smith.langchain.com/api/v1/runs/query",
+                        json={"session": [session_id], "limit": limit, "is_root": True},
+                        headers={"x-api-key": ls_key},
+                        timeout=10,
+                    )
+                    runs = resp2.json().get("runs", [])
+                    if not runs:
+                        return "No recent traces found."
+                    lines = [f"Recent agent traces ({len(runs)}):"]
+                    for r in runs:
+                        status = r.get("status", "?")
+                        start = r.get("start_time", "")[:19]
+                        name_r = r.get("name", "?")
+                        inp = str(r.get("inputs", {}).get("messages", [{}]))[:100]
+                        err = f" ❌ {r['error'][:80]}" if r.get("error") else ""
+                        lines.append(f"• [{start}] {name_r} — {status}{err}\n  Input: {inp}")
+                    return "\n".join(lines)
+                except Exception as exc:
+                    return f"Could not fetch traces: {exc}"
 
             if name == "web_search":
                 if requests is None:
@@ -605,6 +725,25 @@ class QuickChat:
         if not chat_model:
             return ("Quick Chat unavailable — no suitable model configured.", True)
 
+        # Wrap in a LangSmith trace so quick_chat calls appear as named runs
+        # (not just bare ChatOpenAI root spans) in the LangSmith dashboard.
+        _run_tree = None
+        try:
+            from langsmith import Client as _LSClient
+            from langsmith.run_trees import RunTree
+            _ls_key = os.environ.get("LANGSMITH_API_KEY", "")
+            _ls_project = os.environ.get("LANGSMITH_PROJECT", "deeperagents")
+            if _ls_key:
+                _run_tree = RunTree(
+                    name="quick_chat",
+                    run_type="chain",
+                    inputs={"message": message},
+                    project_name=_ls_project,
+                )
+                _run_tree.post()
+        except Exception:
+            _run_tree = None
+
         try:
             if chat_model.startswith("ollama:"):
                 text = await self._ollama_chat(message, soul)
@@ -612,18 +751,30 @@ class QuickChat:
                 text = await self._cerebras_chat(message, soul)
 
             if not text:
+                if _run_tree:
+                    _run_tree.end(outputs={"handoff": True, "reply": ""})
+                    _run_tree.patch()
                 return ("", True)
 
             # If Quick Chat's reply contains a handoff phrase, escalate but keep the text
             # so the user sees Quick Chat's "Let me get the main agent on this" before the main agent starts.
             if any(phrase in text.lower() for phrase in _HANDOFF_PHRASES):
                 logger.info("Quick Chat handoff phrase detected — escalating to main agent")
+                if _run_tree:
+                    _run_tree.end(outputs={"handoff": True, "reply": text[:200]})
+                    _run_tree.patch()
                 return (text, True)
 
+            if _run_tree:
+                _run_tree.end(outputs={"handoff": False, "reply": text[:200]})
+                _run_tree.patch()
             return (text, False)
 
         except Exception as exc:
             logger.exception("Quick Chat error")
+            if _run_tree:
+                _run_tree.end(error=str(exc))
+                _run_tree.patch()
             return (f"Quick Chat error: {exc}", True)
 
     def can_handle(self, message: str) -> bool:

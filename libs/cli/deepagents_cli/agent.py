@@ -771,6 +771,19 @@ def create_cli_agent(
             subagent["model"] = subagent_meta["model"]
         custom_subagents.append(subagent)
 
+    # Merge built-in sub-agents (web-scraper, etc.) — prepend so user-defined
+    # agents of the same name take precedence when the list is deduplicated.
+    try:
+        from deepagents_cli.built_in_subagents import get_built_in_subagents
+
+        built_in = get_built_in_subagents()
+        existing_names = {s["name"] for s in custom_subagents}  # type: ignore[index]
+        for bi in built_in:
+            if bi["name"] not in existing_names:
+                custom_subagents.insert(0, bi)
+    except Exception:
+        logger.warning("Built-in sub-agents failed to load", exc_info=True)
+
     # Build middleware stack based on enabled features
     agent_middleware = []
     agent_middleware.append(ConfigurableModelMiddleware())

@@ -760,6 +760,48 @@ _MUSA_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_cron_jobs",
+            "description": (
+                "List all scheduled cron/recurring jobs. Use when the user asks "
+                "'what jobs are scheduled', 'show my cron jobs', 'what runs daily', "
+                "'check my scheduled tasks', or anything about recurring automation."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_skills",
+            "description": (
+                "List all available agent skills and integrations. Use when the user "
+                "asks 'what can you do', 'what skills do you have', 'what integrations "
+                "are available', 'list your tools', or 'what services are connected'."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recent_traces",
+            "description": (
+                "Fetch recent agent task traces from LangSmith. Use when the user asks "
+                "'check logs', 'show recent tasks', 'what did the agent do', "
+                "'check trace', 'show activity', or 'what happened recently'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Number of traces to return (default 5)"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "handoff_to_agent",
             "description": (
                 "Pass to the full AI agent for HEAVY tasks only. Use ONLY for: "
@@ -939,6 +981,85 @@ async def _execute_musa_tool(name: str, args: dict) -> str:
                 return f"Saved to {', '.join(saved_to)}: {content[:100]}"
             return "Could not save — no memory backend configured."
 
+        if name == "list_cron_jobs":
+            try:
+                from deepagents_cli.cron_store import CronStore
+                store = CronStore()
+                jobs = store.list_jobs()
+                if not jobs:
+                    return "No cron jobs scheduled."
+                lines = [f"Scheduled jobs ({len(jobs)} total):"]
+                for j in jobs:
+                    status = "enabled" if j.enabled else "disabled"
+                    last = j.last_run[:10] if j.last_run else "never"
+                    lines.append(
+                        f"• [{j.id}] {j.name} — {j.schedule} — {status}\n"
+                        f"  Next: {j.next_run[:19]}  Last: {last}\n"
+                        f"  Prompt: {j.prompt[:80]}{'...' if len(j.prompt) > 80 else ''}"
+                    )
+                return "\n".join(lines)
+            except Exception as exc:
+                return f"Could not read cron jobs: {exc}"
+
+        if name == "list_skills":
+            skills = [
+                "gmail — Send/read emails", "github — Repos, issues, PRs",
+                "googlesheets — Read/write spreadsheets", "googledrive — File management",
+                "notion — Pages and databases", "slack — Send messages",
+                "twitter — Post tweets", "linkedin — Post updates",
+                "instagram — Post content", "facebook — Post updates",
+                "telegram_send — Send Telegram messages", "search-online — Web search",
+                "knowledge-base — Ingest and search documents",
+                "memory — Long-term agent memory (Mem0 + AstraDB)",
+                "alchemy — Blockchain / wallet operations",
+                "remotion — Render videos", "upload-post — Upload media",
+                "browser-use — Browser automation", "dropbox — File storage",
+                "google_analytics — Analytics reports",
+                "skill-creator — Create new custom skills",
+            ]
+            return "Available skills:\n" + "\n".join(f"• {s}" for s in skills)
+
+        if name == "get_recent_traces":
+            limit = int(args.get("limit", 5))
+            ls_key = os.environ.get("LANGSMITH_API_KEY", "")
+            ls_project = os.environ.get("LANGSMITH_PROJECT", "deeperagents")
+            if not ls_key:
+                return "LangSmith not configured (no LANGSMITH_API_KEY)."
+            try:
+                import json as _json
+                resp = await asyncio.to_thread(
+                    requests.get,
+                    f"https://api.smith.langchain.com/api/v1/sessions?name={ls_project}",
+                    headers={"x-api-key": ls_key},
+                    timeout=10,
+                )
+                sessions = resp.json()
+                if not sessions:
+                    return "No LangSmith project found."
+                session_id = sessions[0]["id"]
+                resp2 = await asyncio.to_thread(
+                    requests.post,
+                    "https://api.smith.langchain.com/api/v1/runs/query",
+                    json={"session": [session_id], "limit": limit, "is_root": True},
+                    headers={"x-api-key": ls_key},
+                    timeout=10,
+                )
+                runs = resp2.json().get("runs", [])
+                if not runs:
+                    return "No recent traces found."
+                lines = [f"Recent agent traces ({len(runs)}):"]
+                for r in runs:
+                    status = r.get("status", "?")
+                    start = r.get("start_time", "")[:19]
+                    name_r = r.get("name", "?")
+                    msgs = r.get("inputs", {}).get("messages", [{}])
+                    inp = str(msgs[0].get("content", "") if msgs else "")[:100] if isinstance(msgs, list) else str(msgs)[:100]
+                    err = f" ❌ {r['error'][:80]}" if r.get("error") else ""
+                    lines.append(f"• [{start}] {name_r} — {status}{err}\n  {inp}")
+                return "\n".join(lines)
+            except Exception as exc:
+                return f"Could not fetch traces: {exc}"
+
     except Exception as exc:
         return f"Tool error: {exc}"
 
@@ -1010,13 +1131,41 @@ async def _cerebras_chat(message: str, soul: str) -> str | None:
 
 
 async def _quick_chat(message: str) -> tuple[str, bool]:
-    """Ask Musa (Ollama) with soul context. Returns (reply, handoff).
+    """Ask Musa (Ollama/Cerebras) with soul context. Returns (reply, handoff).
 
     Routing is handled by should_use_quick_chat() before this is called.
-    Musa just answers with personality and FDWA context.
-    Falls back to handoff=True on any error so nothing is dropped.
+    Wrapped in a LangSmith RunTree so every quick_chat call is visible as a
+    named 'musa_quick_chat' span in the LangSmith dashboard (not just a bare
+    ChatOpenAI root run).
     """
     soul = _load_soul()
+
+    # Open a LangSmith trace span for this quick_chat call.
+    _run_tree = None
+    try:
+        from langsmith.run_trees import RunTree as _RunTree
+        _ls_key = os.environ.get("LANGSMITH_API_KEY", "")
+        _ls_project = os.environ.get("LANGSMITH_PROJECT", "deeperagents")
+        if _ls_key:
+            _run_tree = _RunTree(
+                name="musa_quick_chat",
+                run_type="chain",
+                inputs={"message": message},
+                project_name=_ls_project,
+            )
+            _run_tree.post()
+    except Exception:
+        _run_tree = None
+
+    def _finish(reply: str, handoff: bool) -> tuple[str, bool]:
+        if _run_tree:
+            try:
+                _run_tree.end(outputs={"reply": reply[:200], "handoff": handoff})
+                _run_tree.patch()
+            except Exception:
+                pass
+        return (reply, handoff)
+
     try:
         if CHAT_MODEL.startswith("ollama:"):
             import json as _json
@@ -1043,32 +1192,32 @@ async def _quick_chat(message: str) -> tuple[str, bool]:
                 logger.warning("Ollama returned %d — trying Cerebras fallback", resp.status_code)
                 text = await _cerebras_chat(message, soul)
                 if text is None:
-                    return ("", True)
+                    return _finish("", True)
         else:
             # Non-Ollama: use Cerebras tool loop (has web_search, memory, etc.)
             # This gives Musa full tool capabilities regardless of chat model.
             text = await _cerebras_chat(message, soul)
             if text is None:
-                return ("", True)  # fallback failed → hand off
+                return _finish("", True)  # fallback failed → hand off
 
         if not text:
-            return ("", True)
+            return _finish("", True)
         # If Musa's reply contains a handoff phrase, escalate but keep the text
         # so the user sees Musa's "On it 🔄" before the full agent starts.
         if any(phrase in text.lower() for phrase in _HANDOFF_PHRASES):
             logger.info("Musa handoff phrase detected — escalating to full agent")
-            return (text, True)
-        return (text, False)
+            return _finish(text, True)
+        return _finish(text, False)
 
     except Exception:
         logger.warning("Musa quick-chat (Ollama) failed — trying Cerebras fallback")
         try:
             text = await _cerebras_chat(message, soul)
             if text:
-                return (text, False)
+                return _finish(text, False)
         except Exception:
             pass
-        return ("", True)
+        return _finish("", True)
 
 
 # ---------------------------------------------------------------------------

@@ -63,6 +63,8 @@ class TestServerGraph:
             http_request=http_tool,
             fetch_url=fetch_tool,
             web_search=object(),
+            hyperbrowser_scrape=object(),
+            firecrawl_scrape=object(),
         )
 
         resolve_mcp_tools = AsyncMock(return_value=([mcp_tool], None, mcp_server_info))

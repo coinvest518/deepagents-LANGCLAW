@@ -26,6 +26,43 @@ _COERCE_ARGS: dict[str, dict[str, str]] = {
 _NULL_STRINGS: frozenset[str] = frozenset({"null", "none", "undefined"})
 
 
+def _unwrap_json_schema_values(args: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Unwrap JSON Schema-style value wrappers that some LLMs (e.g. NVIDIA llama) emit.
+
+    Some open-weight models pass args like::
+
+        {"name": {"type": "string", "value": "fdwa-site-scrape"}}
+
+    instead of the plain::
+
+        {"name": "fdwa-site-scrape"}
+
+    This function strips those wrappers so downstream Pydantic validation sees
+    the bare value.  We also handle ``{"type": "...", "default": X}`` and the
+    less-common ``{"const": X}`` form.
+    """
+    cleaned: dict[str, Any] = {}
+    changed = False
+    for k, v in args.items():
+        if isinstance(v, dict):
+            # Pattern: {"type": "...", "value": X}  or  {"type": "...", "default": X}
+            if "value" in v and "type" in v:
+                cleaned[k] = v["value"]
+                changed = True
+                continue
+            if "default" in v and "type" in v:
+                cleaned[k] = v["default"]
+                changed = True
+                continue
+            # Pattern: {"const": X}
+            if "const" in v and len(v) == 1:
+                cleaned[k] = v["const"]
+                changed = True
+                continue
+        cleaned[k] = v
+    return cleaned, changed
+
+
 def _strip_null_string_args(args: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Remove args whose value is a null-sentinel string like 'null' or 'None'."""
     cleaned = {k: v for k, v in args.items() if not (isinstance(v, str) and v.strip().lower() in _NULL_STRINGS)}
@@ -43,6 +80,12 @@ def _coerce_tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
     name = tool_call.get("name", "")
     args = dict(tool_call.get("args", {}))
     changed = False
+
+    # Pass 0 — unwrap JSON Schema value wrappers (NVIDIA / open-weight LLMs)
+    args, unwrapped = _unwrap_json_schema_values(args)
+    if unwrapped:
+        changed = True
+        logger.debug("Unwrapped JSON Schema value wrappers in %s: keys %s", name, list(args.keys()))
 
     # Pass 1 — generic null-string stripping (applies to ALL tools)
     args, stripped = _strip_null_string_args(args)

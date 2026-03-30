@@ -1,16 +1,18 @@
 """Middleware to detect and break infinite tool-call loops.
 
 Some LLMs (especially open-weight models like Llama 3.3 70B) can get stuck
-calling the same tool with the same arguments repeatedly without ever
-generating a text response.  This middleware detects that pattern and
-forces the agent to stop looping.
+calling the same tool repeatedly without ever generating a text response.
+This middleware detects two distinct loop patterns and forces the agent to stop.
 
-Strategy:
-- ``after_model``: inspect the latest AI message's tool calls.  Walk
-  backwards through message history counting consecutive identical calls
-  (same tool name + same arguments).  If the count hits MAX_REPEATS,
-  strip the tool calls from the AI message and replace with a text nudge
-  so the agent terminates its loop and responds to the user.
+Strategy (two levels):
+- **Exact loop** (``MAX_REPEATS_EXACT``): same tool + same arguments N times in a
+  row.  Classic stuck-LLM pattern.
+- **Name loop** (``MAX_REPEATS_NAME``): same tool name N times in a row regardless
+  of arguments.  Catches models that vary the args slightly each iteration (e.g.
+  NVIDIA llama rewording the ``prompt`` parameter on every ``create_cron_job`` call)
+  so the exact-arg check never fires.
+
+Both checks happen in ``after_model`` before the tool is actually invoked.
 """
 
 from __future__ import annotations
@@ -26,8 +28,10 @@ from langgraph.types import Overwrite
 
 logger = logging.getLogger("deepagents.loop_detection")
 
-# After this many consecutive identical tool calls the loop is broken.
-MAX_REPEATS = 3
+# After this many consecutive identical tool calls (exact args) the loop is broken.
+MAX_REPEATS_EXACT = 3
+# After this many consecutive calls to the *same tool* (any args) the loop is broken.
+MAX_REPEATS_NAME = 5
 
 
 def _tool_call_signature(tc: dict[str, Any]) -> str:
@@ -41,43 +45,84 @@ def _tool_call_signature(tc: dict[str, Any]) -> str:
     return f"{name}::{args_str}"
 
 
-def _count_consecutive_identical_calls(
-    messages: list[Any], signature: str
-) -> int:
-    """Walk backwards through messages counting consecutive matching tool calls.
+def _count_consecutive_by_signature(messages: list[Any], signature: str) -> int:
+    """Walk backwards counting consecutive AIMessages that contain *signature*.
 
-    We look for the pattern:  AIMessage(tool_calls=[X]) → ToolMessage → AIMessage(tool_calls=[X]) → …
-    Returns the number of consecutive times the same signature appears at the
-    tail of the conversation (not counting the current/latest one).
+    Skips ToolMessages (they sit between AI calls).  Stops at the first
+    non-matching AI message or any non-tool human/system message.
     """
     count = 0
     for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
-            # Skip tool result messages — they sit between the AI calls
             continue
         if isinstance(msg, AIMessage) and msg.tool_calls:
-            # Check if this AI message has the same tool call
             sigs = {_tool_call_signature(tc) for tc in msg.tool_calls}
             if signature in sigs:
                 count += 1
             else:
                 break
         else:
-            # Hit a non-tool message (human, system, or text-only AI) — stop
             break
     return count
 
 
-class LoopDetectionMiddleware(AgentMiddleware):
-    """Detects and breaks infinite tool-call loops.
+def _count_consecutive_by_name(messages: list[Any], tool_name: str) -> int:
+    """Walk backwards counting consecutive AIMessages that call *tool_name* (any args).
 
-    When the same tool is called with the same arguments ``max_repeats``
-    times in a row, the middleware strips the tool calls from the AI
-    message and injects a text response so the agent stops looping.
+    Skips ToolMessages.  Stops at the first AI message that does NOT call
+    tool_name, or any non-tool message.
+    """
+    count = 0
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage):
+            continue
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            names = {tc.get("name") for tc in msg.tool_calls}
+            if tool_name in names:
+                count += 1
+            else:
+                break
+        else:
+            break
+    return count
+
+
+def _build_cancel_messages(
+    tool_calls: list[dict[str, Any]], reason: str
+) -> list[ToolMessage]:
+    """Build cancellation ToolMessages for all pending tool calls."""
+    return [
+        ToolMessage(
+            content=(
+                f"[Loop detected] Tool '{tc['name']}' is being called in a loop. "
+                f"{reason} "
+                "Please respond to the user with the information you already have."
+            ),
+            name=tc["name"],
+            tool_call_id=tc["id"],
+        )
+        for tc in tool_calls
+    ]
+
+
+class LoopDetectionMiddleware(AgentMiddleware):
+    """Detects and breaks infinite tool-call loops (exact-args and name-level).
+
+    Args:
+        max_repeats_exact: Break after this many consecutive identical calls
+            (same tool + same args).  Default: 3.
+        max_repeats_name: Break after this many consecutive calls to the same
+            tool regardless of args.  Default: 5.  Set to 0 to disable.
     """
 
-    def __init__(self, max_repeats: int = MAX_REPEATS) -> None:
-        self.max_repeats = max_repeats
+    def __init__(
+        self,
+        max_repeats: int = MAX_REPEATS_EXACT,  # kept for backwards compat
+        max_repeats_exact: int | None = None,
+        max_repeats_name: int = MAX_REPEATS_NAME,
+    ) -> None:
+        self.max_repeats_exact = max_repeats_exact if max_repeats_exact is not None else max_repeats
+        self.max_repeats_name = max_repeats_name
 
     def after_model(self, state: AgentState, runtime: Runtime[Any]) -> dict[str, Any] | None:  # noqa: ARG002
         messages = state["messages"]
@@ -88,47 +133,42 @@ class LoopDetectionMiddleware(AgentMiddleware):
         if not isinstance(last, AIMessage) or not last.tool_calls:
             return None
 
-        # Check each tool call in the latest message
+        history = messages[:-1]
+
         for tc in last.tool_calls:
+            tool_name = tc.get("name", "unknown")
+
+            # --- Level 1: exact same tool + exact same args ---
             sig = _tool_call_signature(tc)
-            # Count how many times this exact call already appears in history
-            # (excluding the current message)
-            prior_count = _count_consecutive_identical_calls(messages[:-1], sig)
-
-            if prior_count >= self.max_repeats - 1:
-                tool_name = tc.get("name", "unknown")
+            exact_count = _count_consecutive_by_signature(history, sig)
+            if exact_count >= self.max_repeats_exact - 1:
                 logger.warning(
-                    "Loop detected: %s called %d consecutive times with identical args. "
-                    "Breaking the loop.",
-                    tool_name,
-                    prior_count + 1,
+                    "Loop detected (exact): %s called %d consecutive times with identical args.",
+                    tool_name, exact_count + 1,
                 )
+                cancel = _build_cancel_messages(
+                    last.tool_calls,
+                    f"It has been called {exact_count + 1} times with the same arguments.",
+                )
+                return {"messages": Overwrite([*messages, *cancel])}
 
-                # Build cancellation ToolMessages for all pending tool calls
-                # so message history stays consistent, then add a nudge.
-                cancel_messages: list[Any] = []
-                for tool_call in last.tool_calls:
-                    cancel_messages.append(
-                        ToolMessage(
-                            content=(
-                                f"[Loop detected] Tool '{tool_call['name']}' has been called "
-                                f"{prior_count + 1} times consecutively with the same arguments. "
-                                "The data has already been retrieved successfully. "
-                                "Please respond to the user with the information you have."
-                            ),
-                            name=tool_call["name"],
-                            tool_call_id=tool_call["id"],
-                        )
+            # --- Level 2: same tool name, any args ---
+            if self.max_repeats_name > 0:
+                name_count = _count_consecutive_by_name(history, tool_name)
+                if name_count >= self.max_repeats_name - 1:
+                    logger.warning(
+                        "Loop detected (name): %s called %d consecutive times (args varied). "
+                        "Breaking the loop.",
+                        tool_name, name_count + 1,
                     )
-
-                # Return the original AI message (with tool_calls intact for
-                # history consistency) plus the cancel ToolMessages.
-                # The agent will see the ToolMessages and on the next model
-                # call the LLM should generate a text response.
-                return {"messages": Overwrite([*messages, *cancel_messages])}
+                    cancel = _build_cancel_messages(
+                        last.tool_calls,
+                        f"It has been called {name_count + 1} consecutive times "
+                        "(with varying arguments — the task was likely completed already).",
+                    )
+                    return {"messages": Overwrite([*messages, *cancel])}
 
         return None
 
-    # Async version delegates to sync — the logic is pure message inspection.
     async def aafter_model(self, state: AgentState, runtime: Runtime[Any]) -> dict[str, Any] | None:
         return self.after_model(state, runtime)
