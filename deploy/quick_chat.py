@@ -793,7 +793,11 @@ class QuickChat:
             return None
 
         model_name = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
-        ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://13.222.51.51:11434")
+        # Support a primary and optional fallback Ollama endpoints (comma-separated)
+        primary_url = os.environ.get("OLLAMA_BASE_URL", "http://3.82.161.94:11434")
+        alt_urls = [u.strip() for u in os.environ.get("OLLAMA_ALT_BASE_URL", "").split(",") if u.strip()]
+        endpoints = [primary_url] + alt_urls
+        # Allow longer default timeout for slow model loads
         try:
             body = json.dumps({
                 "model": model_name,
@@ -803,13 +807,30 @@ class QuickChat:
                 ],
                 "stream": False,
             })
-            resp = await asyncio.to_thread(
-                requests.post,
-                f"{ollama_url}/api/chat",
-                data=body,
-                headers={"Content-Type": "application/json"},
-                timeout=int(os.environ.get("OLLAMA_TIMEOUT", "20")),
-            )
+            timeout = int(os.environ.get("OLLAMA_TIMEOUT", "120"))
+            resp = None
+            last_exc = None
+            for ollama_url in endpoints:
+                try:
+                    resp = await asyncio.to_thread(
+                        requests.post,
+                        f"{ollama_url}/api/chat",
+                        data=body,
+                        headers={"Content-Type": "application/json"},
+                        timeout=timeout,
+                    )
+                    # got a response (may be non-200): stop trying other endpoints
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning("Ollama endpoint %s failed: %s", ollama_url, exc)
+                    resp = None
+                    continue
+            if resp is None:
+                # All endpoints failed
+                if last_exc is not None:
+                    logger.warning("All Ollama endpoints failed: %s", last_exc)
+                return await self._cerebras_chat(message, soul)
             if resp.status_code == 200:
                 try:
                     payload = resp.json()

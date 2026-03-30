@@ -1170,7 +1170,7 @@ async def _quick_chat(message: str) -> tuple[str, bool]:
         if CHAT_MODEL.startswith("ollama:"):
             import json as _json
             model_name = CHAT_MODEL.replace("ollama:", "")
-            ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://13.222.51.51:11434")
+            ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
             body = _json.dumps({
                 "model": model_name,
                 "messages": [
@@ -1184,7 +1184,7 @@ async def _quick_chat(message: str) -> tuple[str, bool]:
                 f"{ollama_url}/api/chat",
                 data=body,
                 headers={"Content-Type": "application/json"},
-                timeout=int(os.environ.get("OLLAMA_TIMEOUT", "20")),
+                timeout=int(os.environ.get("OLLAMA_TIMEOUT", "120")),
             )
             if resp.status_code == 200:
                 text = resp.json().get("message", {}).get("content", "").strip()
