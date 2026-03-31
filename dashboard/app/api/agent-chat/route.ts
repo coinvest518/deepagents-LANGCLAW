@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server'
 // In development, default to the local backend so `npm run dev` works with
 // the Python server running in the repository venv (e.g. http://127.0.0.1:10000).
 const LOCAL_DEFAULT = 'http://127.0.0.1:10000'
-const AGENT_URL = process.env.AGENT_API_URL || (process.env.NODE_ENV !== 'production' ? LOCAL_DEFAULT : '')
+const AGENT_URL = process.env.AGENT_API_URL || process.env.RENDER_AGENT_URL || (process.env.NODE_ENV !== 'production' ? LOCAL_DEFAULT : '')
 
 
 export async function POST(req: Request) {

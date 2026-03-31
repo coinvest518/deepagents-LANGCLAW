@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 
-const AGENT_URL = process.env.AGENT_API_URL || ''
+const AGENT_URL = process.env.AGENT_API_URL || process.env.RENDER_AGENT_URL || ''
 const SECRET = process.env.DASHBOARD_SECRET || ''
 
 export async function GET(req: Request) {
