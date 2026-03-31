@@ -20,6 +20,9 @@ from deepagents_harbor.failure import (
 from deepagents_harbor.stats import format_ci, min_detectable_effect
 
 from deepagents import create_deep_agent
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def scan_dataset_for_solutions(dataset_path: Path) -> dict[str, Path]:
@@ -145,8 +148,8 @@ def extract_task_metadata(trial_dir: Path) -> dict:
                 metadata["git_commit_id"] = config.get("task", {}).get(
                     "git_commit_id", ""
                 )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed reading config.json for %s: %s", config_path, exc)
 
     # Read result.json for additional metadata
     result_path = trial_dir / "result.json"
@@ -161,8 +164,8 @@ def extract_task_metadata(trial_dir: Path) -> dict:
                 )
                 metadata["started_at"] = result.get("started_at", "")
                 metadata["finished_at"] = result.get("finished_at", "")
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed reading result.json for %s: %s", result_path, exc)
 
     return metadata
 
@@ -182,7 +185,8 @@ def extract_task_instructions(trajectory_path: Path) -> Optional[str]:
                 return step.get("message", "")
 
         return None
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed extracting instructions from %s: %s", trajectory_path, exc)
         return None
 
 
@@ -212,7 +216,8 @@ def count_tool_usage(trajectory_path: Path) -> dict[str, int]:
                     tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
 
         return tool_counts
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed counting tool usage for %s: %s", trajectory_path, exc)
         return {}
 
 
@@ -231,8 +236,9 @@ def get_task_name_from_trial(trial_dir: Path) -> Optional[str]:
             with open(config_path, "r") as f:
                 config = json.load(f)
                 return config.get("task", {}).get("path", "")
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed reading config.json for %s: %s", config_path, exc)
+    return None
     return None
 
 
@@ -294,8 +300,8 @@ async def analyze_trial(
                     task_dir = find_task_directory(trial_dir, task_name, task_source)
                     if task_dir:
                         solution_path = task_dir / "solution" / "solve.sh"
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed reading config.json for %s: %s", config_path, exc)
 
     traj_exists = trajectory_path.exists()
     reward_exists = reward_path.exists()
@@ -338,9 +344,9 @@ async def analyze_trial(
                         "utf-8", errors="replace"
                     )
                 except OSError:
-                    print(f"  Warning: Could not read {exception_path}")
+                    logger.warning("Could not read %s", exception_path)
             except OSError as exc:
-                print(f"  Warning: Could not read {exception_path}: {exc}")
+                logger.warning("Could not read %s: %s", exception_path, exc)
 
         # Extract non-zero exit codes from trajectory observation results
         exit_codes = extract_exit_codes(trajectory_text) if trajectory_text else []
@@ -387,6 +393,8 @@ async def scan_jobs_directory(
     trials: list[Trial] = []
     for trial_dir in trial_dirs:
         trial = await analyze_trial(trial_dir, solution_mapping=solution_mapping)
+        if trial is None:
+            continue
         trials.append(trial)
     return trials
 
@@ -529,7 +537,8 @@ def print_summary(trials: list[Trial]) -> None:
                     else exception_content
                 )
                 print(f"  Exception: ...{exception_snippet}")
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Error reading exception file %s: %s", trial.exception_path, exc)
                 print("  Exception: [Error reading exception file]")
 
         # Display tool usage if available
@@ -891,7 +900,7 @@ async def main():
                         print(f"  ✓ Analysis written to: {output_file}")
                     else:
                         print("  ✗ Skipped (no trajectory or already completed)")
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     print(f"  ✗ Error: {e}")
 
             print(f"\n{'=' * 80}")

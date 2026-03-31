@@ -16,5 +16,11 @@
       }
     }
 
+    ,
+    "composio-docs": {
+      "type": "http",
+      "url": "https://docs.composio.dev/mcp"
+    }
+
   }
 }

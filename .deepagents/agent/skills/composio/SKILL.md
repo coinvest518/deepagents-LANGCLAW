@@ -53,3 +53,28 @@ composio init
 ```
 
 > Full reference: [Building with Composio](rules/building-with-composio.md)
+
+---
+
+## Quick Reference (agent guidance)
+
+- Tools are single API actions (tool slugs) grouped by toolkits like `gmail`, `github`, `googlesheets`.
+- All tool calls must be scoped to a user — resolve account IDs via `COMPOSIO_<TOOLKIT>_ACCOUNT_ID` env vars or `deploy/composio_routing.json` + `libs/cli/deepagents_cli/composio_router.py`.
+- Before calling an unfamiliar action, call `composio_get_schema("ACTION_SLUG")` to learn parameter names, types, and required fields.
+
+### Recommended agent flow
+1. Discover schema with `composio_get_schema("ACTION_SLUG")`.
+2. Validate/coerce arguments to the schema types.
+3. Execute with `composio_action("ACTION_SLUG", arguments)` or via the unified dispatcher `deepagents_cli.composio_dispatcher.dispatch(action, arguments)` for non-blocking agent code.
+4. If you get a 404 / "not found" error, do not retry — the slug is likely incorrect. Use `composio_get_schema` or consult the skill docs to find the exact slug.
+
+### Error handling hints
+- When arguments are malformed, return the schema to the LLM as a hint so it can correct the argument shape.
+- If Composio is not configured (missing `COMPOSIO_API_KEY`/`COMPOSIO_API_URL`), return a clear message like `COMPOSIO not configured` instead of raw exception traces.
+
+### Dispatcher
+- Use `libs/cli/deepagents_cli/composio_dispatcher.py` for a consistent HTTP-based execute flow. It resolves account ids from env, posts to `/v1/execute`, and returns `{"success": True/False, "result"/"error": ...}`.
+
+### MCP docs
+If programmatic docs are needed, `.mcp.json` includes `composio-docs` so tools can fetch Composio docs via MCP.
+

@@ -216,6 +216,14 @@ from deepagents_cli.telegram_integration import (  # noqa: E402
 # Import Quick Chat module for standalone functionality
 from quick_chat import handle_quick_chat, should_use_quick_chat
 
+# Optional: composio helpers (use unified dispatcher when available)
+try:
+    from deepagents_cli import composio_action, composio_get_schema, composio_dispatch  # type: ignore
+except Exception:
+    composio_action = None  # type: ignore
+    composio_get_schema = None  # type: ignore
+    composio_dispatch = None  # type: ignore
+
 
 def _clear_webhook() -> None:
     """Call deleteWebhook at startup to release any stuck long-poll connection.

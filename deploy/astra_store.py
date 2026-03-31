@@ -99,7 +99,7 @@ class AstraTaskStore:
     def _async_write(self, *args, **kwargs) -> None:
         try:
             loop = asyncio.get_running_loop()
-            loop.run_in_executor(None, self._write, *args, **kwargs)
+            loop.run_in_executor(None, lambda: self._write(*args, **kwargs))
         except RuntimeError:
             pass  # no running event loop — skip fire-and-forget write
 

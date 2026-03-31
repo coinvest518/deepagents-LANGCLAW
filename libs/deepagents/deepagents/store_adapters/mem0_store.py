@@ -68,8 +68,8 @@ class Mem0Store:
                     key=r.get("id", ""),
                     value={"memory": r.get("memory", ""), "id": r.get("id", "")},
                 )
-        except Exception:
-            logger.debug("Mem0Store.get failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Mem0Store.get failed: %s", exc, exc_info=True)
         return None
 
     def put(self, user_id: str, content: str, metadata: dict | None = None) -> None:
@@ -80,8 +80,8 @@ class Mem0Store:
                 user_id=user_id,
                 metadata=metadata,
             )
-        except Exception:
-            logger.warning("Mem0Store.put failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Mem0Store.put failed: %s", exc, exc_info=True)
 
     def search(self, query: str, user_id: str = "default", limit: int = 10) -> list[StoreItem]:
         """Semantic search across memories for a user."""
@@ -106,8 +106,8 @@ class Mem0Store:
                     },
                 ))
             return items
-        except Exception:
-            logger.warning("Mem0Store.search failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Mem0Store.search failed: %s", exc, exc_info=True)
             return []
 
     def get_all(self, user_id: str = "default", limit: int = 50) -> list[StoreItem]:
@@ -127,8 +127,8 @@ class Mem0Store:
                     value={"memory": r.get("memory", ""), "id": r.get("id", "")},
                 ))
             return items
-        except Exception:
-            logger.warning("Mem0Store.get_all failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Mem0Store.get_all failed: %s", exc, exc_info=True)
             return []
 
     # Async wrappers
