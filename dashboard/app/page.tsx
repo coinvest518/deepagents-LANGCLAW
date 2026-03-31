@@ -103,7 +103,7 @@ export default function CommandCenter() {
 
   useEffect(() => {
     load()
-    const iv = setInterval(() => { load(); setTick(t => t+1) }, 15000)
+    const iv = setInterval(() => { load(); setTick(t => t+1) }, 60000)
     const clock = setInterval(() => setTime(new Date().toUTCString().slice(0,25)), 1000)
     return () => { clearInterval(iv); clearInterval(clock) }
   }, [load])

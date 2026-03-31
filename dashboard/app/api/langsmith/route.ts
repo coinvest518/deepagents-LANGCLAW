@@ -7,6 +7,21 @@ const BASE = 'https://api.smith.langchain.com/api/v1'
 // Cache the session UUID so we only look it up once per process.
 let _sessionId: string | null = null
 
+// ── Response cache (avoid hammering LangSmith on every poll) ─────────────
+interface CacheEntry { data: any; ts: number }
+const _cache: Record<string, CacheEntry> = {}
+const CACHE_TTL_MS = 30_000 // 30 seconds
+
+function getCached(key: string): any | null {
+  const entry = _cache[key]
+  if (entry && Date.now() - entry.ts < CACHE_TTL_MS) return entry.data
+  return null
+}
+
+function setCache(key: string, data: any) {
+  _cache[key] = { data, ts: Date.now() }
+}
+
 async function getSessionId(): Promise<string | null> {
   if (_sessionId) return _sessionId
   const res = await fetch(`${BASE}/sessions?name=${encodeURIComponent(LS_PROJECT)}`, {
@@ -122,16 +137,22 @@ export async function GET(req: Request) {
     }
 
     if (type === 'runs') {
+      const cached = getCached('runs')
+      if (cached) return NextResponse.json(cached)
       const data = await ls('/runs/query', {
         session: [sessionId],
         filter: 'eq(is_root, true)',
         limit: 25,
       })
       const runs = (data?.runs || []).map(mapRun)
-      return NextResponse.json({ runs, _raw_count: data?.runs?.length ?? 0 })
+      const result = { runs, _raw_count: data?.runs?.length ?? 0 }
+      setCache('runs', result)
+      return NextResponse.json(result)
     }
 
     if (type === 'stats') {
+      const cached = getCached('stats')
+      if (cached) return NextResponse.json(cached)
       const data = await ls('/runs/query', {
         session: [sessionId],
         filter: 'eq(is_root, true)',
@@ -164,7 +185,9 @@ export async function GET(req: Request) {
         if (m) modelCounts[m] = (modelCounts[m] || 0) + 1
       })
 
-      return NextResponse.json({ totalTokens, totalRuns, errors, avgTokens, avgLatency, chart, modelCounts })
+      const statsResult = { totalTokens, totalRuns, errors, avgTokens, avgLatency, chart, modelCounts }
+      setCache('stats', statsResult)
+      return NextResponse.json(statsResult)
     }
 
     if (type === 'trace') {
