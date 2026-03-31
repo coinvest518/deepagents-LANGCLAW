@@ -2150,7 +2150,7 @@ async def start_api_server(agent: object) -> None:
 
         async with _api_locks[thread_id]:
             try:
-                if should_use_quick_chat(message) and CHAT_MODEL != MODEL:
+                if should_use_quick_chat(message) and CHAT_MODEL != MODEL and data.get("source") != "dashboard":
                     response, handoff = await handle_quick_chat(message)
                     if not handoff:
                         task_store.done(task_id, response)
