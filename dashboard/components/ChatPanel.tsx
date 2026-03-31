@@ -29,7 +29,6 @@ export default function ChatPanel() {
   const [status, setStatus] = useState<'unknown' | 'ok' | 'offline'>('unknown')
   const [historyLoaded, setHistoryLoaded] = useState(false)
   const threadId = useRef<string>('')
-  const bottomRef = useRef<HTMLDivElement>(null)
 
   // Initialise thread_id from localStorage (stable across refreshes)
   useEffect(() => {
@@ -64,8 +63,10 @@ export default function ChatPanel() {
       .catch(() => setHistoryLoaded(true))
   }, [historyLoaded])
 
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const el = messagesContainerRef.current
+    if (el) el.scrollTop = el.scrollHeight
   }, [messages])
 
   const send = useCallback(async () => {
@@ -131,7 +132,7 @@ export default function ChatPanel() {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto space-y-2 min-h-0 pr-1">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-2 min-h-0 pr-1">
         {messages.length === 0 && (
           <div className="text-center text-hud-text/20 text-[10px] pt-8 tracking-widest">
             <div className="text-2xl mb-2">◈</div>
@@ -160,7 +161,6 @@ export default function ChatPanel() {
             </span>
           </div>
         )}
-        <div ref={bottomRef} />
       </div>
 
       {/* Input */}
@@ -169,7 +169,7 @@ export default function ChatPanel() {
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
-          placeholder={status === 'offline' ? 'Agent offline — check RENDER_AGENT_URL' : 'Send a message or task…'}
+          placeholder={status === 'offline' ? 'Agent offline — start local server or check AGENT_API_URL' : 'Send a message or task…'}
           disabled={loading || status === 'offline'}
           className="flex-1 bg-hud-bg border border-hud-border rounded px-3 py-2 text-[11px] text-hud-text placeholder-hud-text/25 focus:outline-none focus:border-hud-cyan/50 disabled:opacity-40"
         />
