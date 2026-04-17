@@ -1,3 +1,4 @@
+
 """Headless Telegram bot entry point — for Render (or any cloud) deployment.
 
 This script starts the DeepAgents LangGraph server, then runs a Telegram
@@ -90,12 +91,16 @@ def _pick_model() -> str:
     picked = _router.pick("main")
     if picked:
         return picked
-    # Absolute fallback (router unavailable): direct-API providers first
+    # Absolute fallback (router unavailable): OpenRouter first, NVIDIA last
     for env_key, spec in [
+        ("OPENROUTER_API_KEY",       "openrouter:deepseek/deepseek-chat-v3-0324:free"),
+        ("OPENROUTER_API_KEY",       "openrouter:meta-llama/llama-4-maverick:free"),
+        ("OPENROUTER_API_KEY",       "openrouter:qwen/qwen3.5-72b-instruct:free"),
+        ("MOONSHOT_API_KEY",         "moonshot:kimi-k2.5"),
+        ("CLOUDFLARE_AI_API_KEY",    "cloudflare:@cf/meta/llama-4-scout-instruct"),
+        ("CEREBRAS_API_KEY",         "cerebras:llama-4-scout-17b-16e-instruct"),
+        ("NVIDIA_API_KEY",           "nvidia:qwen/qwen3.5-397b-a17b"),
         ("MISTRAL_API_KEY",          "mistralai:mistral-large-latest"),
-        ("NVIDIA_API_KEY",           "nvidia:meta/llama-3.3-70b-instruct"),
-        ("OPENROUTER_API_KEY",       "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"),
-        ("CEREBRAS_API_KEY",         "cerebras:llama-3.3-70b"),
         ("HUGGINGFACEHUB_API_TOKEN", "huggingface:Qwen/Qwen2.5-72B-Instruct"),
     ]:
 
@@ -130,9 +135,10 @@ def _pick_chat_model() -> str:
 
     Priority:
       1. Ollama    — free self-hosted AWS endpoint (no API cost, fast)
-      2. Cerebras  — fastest cloud inference (600k TPM free, llama3.1-8b)
-      3. Mistral Small — cheap fallback
-      4. Same as MODEL — no dedicated fast path
+      2. Cerebras  — fastest cloud inference (Llama 4 Scout)
+      3. Cloudflare Workers AI — fast, free tier
+      4. Mistral Small — cheap fallback
+      5. Same as MODEL — no dedicated fast path
 
     When result equals MODEL the fast path is skipped — no point making a
     separate call to the same model just to skip tools.
@@ -141,7 +147,9 @@ def _pick_chat_model() -> str:
         model = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
         return f"ollama:{model}"
     if os.environ.get("CEREBRAS_API_KEY"):
-        return "cerebras:llama-3.3-70b"
+        return "cerebras:llama-4-scout-17b-16e-instruct"
+    if os.environ.get("CLOUDFLARE_AI_API_KEY"):
+        return "cloudflare:@cf/meta/llama-3.3-70b-instruct-fp8-fast"
     if os.environ.get("MISTRAL_API_KEY"):
         return "mistralai:mistral-small-latest"
     return MODEL  # no cheaper option available → skip fast path
@@ -182,11 +190,16 @@ def _load_soul() -> str:
     global _SOUL_CACHE
     if _SOUL_CACHE is None:
         soul_path = Path(__file__).parent / "agent_soul.md"
-        _SOUL_CACHE = (
-            soul_path.read_text(encoding="utf-8")
-            if soul_path.exists()
-            else "You are Musa, Daniel's personal AI assistant for FDWA (Futuristic Digital Wealth Agency)."
-        )
+        if soul_path.exists():
+            try:
+                _SOUL_CACHE = soul_path.read_text(encoding="utf-8")
+                logger.info("telegram_bot loaded Musa soul from %s", soul_path.name)
+            except Exception:
+                _SOUL_CACHE = "You are Musa, Daniel's personal AI assistant for FDWA (Futuristic Digital Wealth Agency)."
+                logger.exception("Failed to read %s, using inline default soul", soul_path)
+        else:
+            _SOUL_CACHE = "You are Musa, Daniel's personal AI assistant for FDWA (Futuristic Digital Wealth Agency)."
+            logger.info("telegram_bot using inline default Musa soul (no agent_soul.md found)")
     return _SOUL_CACHE
 
 
@@ -194,7 +207,16 @@ def _load_soul() -> str:
 
 AGENT_ID: str = os.environ.get("DA_AGENT_ID", "default")
 AUTO_APPROVE: bool = os.environ.get("DA_AUTO_APPROVE", "1").lower() in {"1", "true", "yes"}
-ENABLE_SHELL: bool = os.environ.get("DA_ENABLE_SHELL", "0").lower() in {"1", "true", "yes"}
+# Sandbox controls where filesystem/shell tools execute. Daytona = ephemeral
+# remote Linux box per session — safe to enable shell there.
+SANDBOX_TYPE: str = (os.environ.get("USE_SANDBOX") or "none").strip().lower() or "none"
+# Default shell to ON when sandboxed (Daytona), OFF otherwise. Explicit
+# DA_ENABLE_SHELL still wins if set.
+_shell_env = os.environ.get("DA_ENABLE_SHELL")
+if _shell_env is None:
+    ENABLE_SHELL: bool = SANDBOX_TYPE != "none"
+else:
+    ENABLE_SHELL = _shell_env.lower() in {"1", "true", "yes"}
 DASHBOARD_SECRET: str = os.environ.get("DASHBOARD_SECRET", "")
 API_PORT: int = int(os.environ.get("PORT", "10000"))
 
@@ -212,9 +234,6 @@ from deepagents_cli.telegram_integration import (  # noqa: E402
     TelegramIntegration,
     is_telegram_enabled,
 )
-
-# Import Quick Chat module for standalone functionality
-from quick_chat import handle_quick_chat, should_use_quick_chat
 
 # Optional: composio helpers (use unified dispatcher when available)
 try:
@@ -272,9 +291,11 @@ def _text_from_message(msg: object) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
+        # Only include "text" type blocks, skip thinking/reasoning
         return "".join(
             block.get("text", "") if isinstance(block, dict) else str(block)
             for block in content
+            if not isinstance(block, dict) or block.get("type", "text") == "text"
         )
     return ""
 
@@ -567,6 +588,7 @@ async def _run_agent(
     agent_input: object,
     thread_id: str,
     progress_cb: object = None,
+    collect_steps: bool = False,
 ) -> tuple[str, list]:
     """Run the agent for *agent_input* and return ``(response_text, interrupts)``.
 
@@ -580,6 +602,10 @@ async def _run_agent(
     progress_cb: optional async callable(status: str) — called each time a
     meaningful step is detected, rate-limited to once per second.
     Heartbeat fires "🤔 Thinking…" every 4 seconds if nothing else fires.
+
+    When *collect_steps* is True the returned tuple gains a third element:
+    ``(response_text, interrupts, steps_info)`` where *steps_info* is a dict
+    with ``tool_calls`` and ``thinking`` lists for the dashboard.
     """
     import time as _time
     config: dict = {"configurable": {"thread_id": thread_id}}
@@ -588,6 +614,8 @@ async def _run_agent(
         _last_heartbeat = _time.monotonic()
         _MIN_INTERVAL = 1.0    # minimum seconds between any two progress edits
         _HEARTBEAT_EVERY = 4.0
+        _collected_tool_calls: list[dict] = []
+        _collected_thinking: list[dict] = []
 
         async def _maybe_update(status: str) -> None:
             nonlocal _last_progress, _last_heartbeat
@@ -618,6 +646,29 @@ async def _run_agent(
                         if intr_list:
                             detected_interrupts.extend(intr_list)
                             break
+                    # Collect steps for dashboard
+                    if collect_steps:
+                        for node_name, node_data in data.items():
+                            if node_name == "__interrupt__":
+                                continue
+                            if isinstance(node_data, dict):
+                                for msg in node_data.get("messages", []):
+                                    tc_list = getattr(msg, "tool_calls", None) or (msg.get("tool_calls") if isinstance(msg, dict) else None)
+                                    if tc_list:
+                                        for tc in tc_list:
+                                            tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                                            tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                                            if tc_name:
+                                                _collected_tool_calls.append({"name": tc_name, "args": tc_args})
+                                    msg_type = getattr(msg, "type", "") or (msg.get("type", "") if isinstance(msg, dict) else "")
+                                    if msg_type in ("tool", "ToolMessage"):
+                                        tool_name = getattr(msg, "name", None) or (msg.get("name") if isinstance(msg, dict) else None)
+                                        content = getattr(msg, "content", "") or (msg.get("content", "") if isinstance(msg, dict) else "")
+                                        _collected_thinking.append({
+                                            "type": "tool_result",
+                                            "toolName": tool_name or "tool",
+                                            "content": str(content)[:300],
+                                        })
                     if progress_cb is not None:
                         status = _status_from_update(data)
                         await _maybe_update(status)
@@ -647,12 +698,19 @@ async def _run_agent(
                     except Exception:
                         pass
 
+        def _make_steps_info() -> dict:
+            return {"tool_calls": _collected_tool_calls, "thinking": _collected_thinking}
+
         if detected_interrupts:
+            if collect_steps:
+                return "", detected_interrupts, _make_steps_info()  # type: ignore[return-value]
             return "", detected_interrupts
 
         # Read the final state for the response text.
         state = await agent.aget_state(config)  # type: ignore[union-attr]
         if state is None:
+            if collect_steps:
+                return "No response received.", [], _make_steps_info()  # type: ignore[return-value]
             return "No response received.", []
         messages = getattr(state, "values", {}).get("messages", [])
 
@@ -669,8 +727,25 @@ async def _run_agent(
         for msg in reversed(messages):
             text = _text_from_message(msg)
             if text.strip():
+                if collect_steps:
+                    return text.strip(), [], _make_steps_info()  # type: ignore[return-value]
                 return text.strip(), []
 
+        # Fallback: if no plain AI message was found, accept the latest
+        # non-empty tool output. Some graphs emit the final text as a tool
+        # result instead of a separate AI message — display that to users.
+        for msg in reversed(messages):
+            if isinstance(msg, dict):
+                content = msg.get("content", "")
+            else:
+                content = getattr(msg, "content", "")
+            if isinstance(content, str) and content.strip():
+                if collect_steps:
+                    return content.strip(), [], _make_steps_info()  # type: ignore[return-value]
+                return content.strip(), []
+
+        if collect_steps:
+            return "No response received.", [], _make_steps_info()  # type: ignore[return-value]
         return "No response received.", []
 
     except asyncio.CancelledError:
@@ -678,554 +753,6 @@ async def _run_agent(
     except Exception:
         logger.exception("Agent error (thread=%s)", thread_id)
         raise  # bubble up so _handle_external_message shows the real error
-
-
-# ---------------------------------------------------------------------------
-# Musa lightweight tool set (Cerebras tool loop — no LangGraph needed)
-# ---------------------------------------------------------------------------
-
-# Musa tools — lightweight versions for quick tasks so we don't need the
-# full LangGraph agent for simple lookups. Musa is the brain/soul and can
-# handle: web search, memory, chat history, time, URL fetch.
-# Only hands off to the full agent for multi-step tasks (email, posting, etc.)
-_MUSA_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": (
-                "Search the web for current information. Use for: weather, news, "
-                "stock prices, scores, facts, anything needing real-time data. "
-                "Returns top 3 results with titles, URLs, and snippets."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search query"},
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_memory",
-            "description": (
-                "Search the agent's long-term memory for past conversations, saved facts, "
-                "user preferences, and previous task results. Use when the user asks: "
-                "'what did we discuss', 'remember when', 'what did the agent do', "
-                "'check memory', or references past work."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "What to search for in memory"},
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "save_memory",
-            "description": (
-                "Save information to long-term memory. Use when user says 'remember this', "
-                "'save this', 'note that', or when you learn something important."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {"type": "string", "description": "What to remember"},
-                },
-                "required": ["content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_url",
-            "description": "Fetch and read the content of a web page URL.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "URL to fetch"},
-                },
-                "required": ["url"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_time",
-            "description": "Get the current date and time.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_cron_jobs",
-            "description": (
-                "List all scheduled cron/recurring jobs. Use when the user asks "
-                "'what jobs are scheduled', 'show my cron jobs', 'what runs daily', "
-                "'check my scheduled tasks', or anything about recurring automation."
-            ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_skills",
-            "description": (
-                "List all available agent skills and integrations. Use when the user "
-                "asks 'what can you do', 'what skills do you have', 'what integrations "
-                "are available', 'list your tools', or 'what services are connected'."
-            ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_recent_traces",
-            "description": (
-                "Fetch recent agent task traces from LangSmith. Use when the user asks "
-                "'check logs', 'show recent tasks', 'what did the agent do', "
-                "'check trace', 'show activity', or 'what happened recently'."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "description": "Number of traces to return (default 5)"},
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "handoff_to_agent",
-            "description": (
-                "Pass to the full AI agent for HEAVY tasks only. Use ONLY for: "
-                "sending emails, posting to social media, creating spreadsheets, "
-                "GitHub operations, multi-step workflows, code execution, file operations, "
-                "or anything needing Composio integrations (Gmail, Sheets, etc.). "
-                "Do NOT use for: web search, memory lookup, simple questions — handle those yourself."
-            ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-]
-
-
-_MUSA_HANDOFF_SENTINEL = "__HANDOFF__"
-
-
-async def _execute_musa_tool(name: str, args: dict) -> str:
-    """Execute one Musa tool and return a result string."""
-    try:
-        if name == "handoff_to_agent":
-            return _MUSA_HANDOFF_SENTINEL
-
-        if name == "get_time":
-            import datetime
-            return datetime.datetime.now().strftime("%A, %B %d, %Y at %H:%M:%S")
-
-        if name == "web_search":
-            tavily_key = os.environ.get("TAVILY_API_KEY", "")
-            if not tavily_key:
-                return "Web search unavailable (no TAVILY_API_KEY)."
-            import json as _json
-            body = _json.dumps({
-                "api_key": tavily_key,
-                "query": args.get("query", ""),
-                "max_results": 3,
-            })
-            resp = await asyncio.to_thread(
-                requests.post,
-                "https://api.tavily.com/search",
-                data=body,
-                headers={"Content-Type": "application/json"},
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                return f"Search failed (status {resp.status_code})."
-            results = resp.json().get("results", [])
-            if not results:
-                return "No results found."
-            return "\n\n".join(
-                f"{r.get('title','')}\n{r.get('url','')}\n{r.get('content','')[:300]}"
-                for r in results
-            )
-
-        if name == "fetch_url":
-            url = args.get("url", "")
-            if not url:
-                return "No URL provided."
-            resp = await asyncio.to_thread(
-                requests.get, url, timeout=8, headers={"User-Agent": "Mozilla/5.0"}
-            )
-            if resp.status_code != 200:
-                return f"Fetch failed (status {resp.status_code})."
-            # Strip HTML tags simply
-            import re as _re
-            text = _re.sub(r"<[^>]+>", " ", resp.text)
-            text = _re.sub(r"\s+", " ", text).strip()
-            return text[:1500]
-
-        if name == "search_memory":
-            query = args.get("query", "")
-            if not query:
-                return "No query provided."
-            # Try Mem0 first (semantic), then AstraDB (structured)
-            results_text = []
-            mem0_key = os.environ.get("MEM0_API_KEY", "")
-            if mem0_key:
-                try:
-                    import json as _json
-                    body = _json.dumps({
-                        "query": query,
-                        "filters": {"AND": [{"user_id": "default"}]},
-                        "limit": 5,
-                    })
-                    resp = await asyncio.to_thread(
-                        requests.post,
-                        "https://api.mem0.ai/v2/memories/search/",
-                        data=body,
-                        headers={
-                            "Authorization": f"Token {mem0_key}",
-                            "Content-Type": "application/json",
-                        },
-                        timeout=10,
-                    )
-                    if resp.status_code == 200:
-                        hits = resp.json().get("results", [])
-                        for h in hits:
-                            mem = h.get("memory", "")
-                            score = h.get("score", "")
-                            created = h.get("created_at", "")[:10]
-                            if mem:
-                                results_text.append(f"[{created}] {mem} (relevance: {score})")
-                except Exception as exc:
-                    results_text.append(f"(Mem0 error: {exc})")
-
-            astra_key = os.environ.get("ASTRA_DB_API_KEY", "")
-            astra_endpoint = os.environ.get("ASTRA_DB_ENDPOINT", "")
-            if astra_key and astra_endpoint:
-                try:
-                    from astrapy import DataAPIClient
-                    client = DataAPIClient()
-                    db = client.get_database(astra_endpoint, token=astra_key)
-                    coll = db.get_collection("agent_memory")
-                    docs = list(coll.find({"user_id": "default"}, limit=5))
-                    for d in docs:
-                        content = d.get("content", "")
-                        cat = d.get("category", "")
-                        created = d.get("created_at", "")[:10]
-                        if content:
-                            results_text.append(f"[{created}] [{cat}] {content}")
-                except Exception as exc:
-                    results_text.append(f"(AstraDB error: {exc})")
-
-            if not results_text:
-                return "No memories found for that query."
-            return f"Found {len(results_text)} memories:\n\n" + "\n".join(results_text)
-
-        if name == "save_memory":
-            content = args.get("content", "")
-            if not content:
-                return "No content provided."
-            saved_to = []
-            mem0_key = os.environ.get("MEM0_API_KEY", "")
-            if mem0_key:
-                try:
-                    import json as _json
-                    body = _json.dumps({
-                        "messages": [{"role": "user", "content": content}],
-                        "user_id": "default",
-                    })
-                    resp = await asyncio.to_thread(
-                        requests.post,
-                        "https://api.mem0.ai/v2/memories/",
-                        data=body,
-                        headers={
-                            "Authorization": f"Token {mem0_key}",
-                            "Content-Type": "application/json",
-                        },
-                        timeout=10,
-                    )
-                    if resp.status_code in (200, 201):
-                        saved_to.append("Mem0")
-                except Exception:
-                    pass
-
-            astra_key = os.environ.get("ASTRA_DB_API_KEY", "")
-            astra_endpoint = os.environ.get("ASTRA_DB_ENDPOINT", "")
-            if astra_key and astra_endpoint:
-                try:
-                    from astrapy import DataAPIClient
-                    from datetime import datetime, timezone
-                    client = DataAPIClient()
-                    db = client.get_database(astra_endpoint, token=astra_key)
-                    coll = db.get_collection("agent_memory")
-                    coll.insert_one({
-                        "content": content,
-                        "user_id": "default",
-                        "category": "general",
-                        "type": "memory",
-                        "created_at": datetime.now(timezone.utc).isoformat(),
-                    })
-                    saved_to.append("AstraDB")
-                except Exception:
-                    pass
-
-            if saved_to:
-                return f"Saved to {', '.join(saved_to)}: {content[:100]}"
-            return "Could not save — no memory backend configured."
-
-        if name == "list_cron_jobs":
-            try:
-                from deepagents_cli.cron_store import CronStore
-                store = CronStore()
-                jobs = store.list_jobs()
-                if not jobs:
-                    return "No cron jobs scheduled."
-                lines = [f"Scheduled jobs ({len(jobs)} total):"]
-                for j in jobs:
-                    status = "enabled" if j.enabled else "disabled"
-                    last = j.last_run[:10] if j.last_run else "never"
-                    lines.append(
-                        f"• [{j.id}] {j.name} — {j.schedule} — {status}\n"
-                        f"  Next: {j.next_run[:19]}  Last: {last}\n"
-                        f"  Prompt: {j.prompt[:80]}{'...' if len(j.prompt) > 80 else ''}"
-                    )
-                return "\n".join(lines)
-            except Exception as exc:
-                return f"Could not read cron jobs: {exc}"
-
-        if name == "list_skills":
-            skills = [
-                "gmail — Send/read emails", "github — Repos, issues, PRs",
-                "googlesheets — Read/write spreadsheets", "googledrive — File management",
-                "notion — Pages and databases", "slack — Send messages",
-                "twitter — Post tweets", "linkedin — Post updates",
-                "instagram — Post content", "facebook — Post updates",
-                "telegram_send — Send Telegram messages", "search-online — Web search",
-                "knowledge-base — Ingest and search documents",
-                "memory — Long-term agent memory (Mem0 + AstraDB)",
-                "alchemy — Blockchain / wallet operations",
-                "remotion — Render videos", "upload-post — Upload media",
-                "browser-use — Browser automation", "dropbox — File storage",
-                "google_analytics — Analytics reports",
-                "skill-creator — Create new custom skills",
-            ]
-            return "Available skills:\n" + "\n".join(f"• {s}" for s in skills)
-
-        if name == "get_recent_traces":
-            limit = int(args.get("limit", 5))
-            ls_key = os.environ.get("LANGSMITH_API_KEY", "")
-            ls_project = os.environ.get("LANGSMITH_PROJECT", "deeperagents")
-            if not ls_key:
-                return "LangSmith not configured (no LANGSMITH_API_KEY)."
-            try:
-                import json as _json
-                resp = await asyncio.to_thread(
-                    requests.get,
-                    f"https://api.smith.langchain.com/api/v1/sessions?name={ls_project}",
-                    headers={"x-api-key": ls_key},
-                    timeout=10,
-                )
-                sessions = resp.json()
-                if not sessions:
-                    return "No LangSmith project found."
-                session_id = sessions[0]["id"]
-                resp2 = await asyncio.to_thread(
-                    requests.post,
-                    "https://api.smith.langchain.com/api/v1/runs/query",
-                    json={"session": [session_id], "limit": limit, "is_root": True},
-                    headers={"x-api-key": ls_key},
-                    timeout=10,
-                )
-                runs = resp2.json().get("runs", [])
-                if not runs:
-                    return "No recent traces found."
-                lines = [f"Recent agent traces ({len(runs)}):"]
-                for r in runs:
-                    status = r.get("status", "?")
-                    start = r.get("start_time", "")[:19]
-                    name_r = r.get("name", "?")
-                    msgs = r.get("inputs", {}).get("messages", [{}])
-                    inp = str(msgs[0].get("content", "") if msgs else "")[:100] if isinstance(msgs, list) else str(msgs)[:100]
-                    err = f" ❌ {r['error'][:80]}" if r.get("error") else ""
-                    lines.append(f"• [{start}] {name_r} — {status}{err}\n  {inp}")
-                return "\n".join(lines)
-            except Exception as exc:
-                return f"Could not fetch traces: {exc}"
-
-    except Exception as exc:
-        return f"Tool error: {exc}"
-
-    return "Unknown tool."
-
-
-async def _cerebras_chat(message: str, soul: str) -> str | None:
-    """Cerebras cloud fallback for Musa — with a lightweight tool loop.
-
-    Supports: web_search (Tavily), get_time, fetch_url.
-    Uses Cerebras's OpenAI-compatible API (no langchain-cerebras needed).
-    Returns reply text, or None on failure.
-    """
-    key = os.environ.get("CEREBRAS_API_KEY", "")
-    if not key:
-        return None
-    try:
-        import json as _json
-        from langchain_openai import ChatOpenAI
-        from langchain_core.messages import HumanMessage, ToolMessage
-        from langchain_core.messages import SystemMessage as SM
-
-        llm = ChatOpenAI(
-            model="llama3.1-8b",
-            api_key=key,
-            base_url="https://api.cerebras.ai/v1",
-        )
-        llm_with_tools = llm.bind_tools(_MUSA_TOOLS)
-
-        msgs: list = [SM(content=soul), HumanMessage(content=message)]
-
-        for _iteration in range(3):  # max 3 tool calls then final answer
-            resp = await llm_with_tools.ainvoke(msgs)
-            tool_calls = getattr(resp, "tool_calls", None) or []
-
-            if not tool_calls:
-                # No tool call — this is the final answer
-                text = str(resp.content).strip()
-                if text:
-                    logger.info("Cerebras reply (iter=%d): %.80s", _iteration, text)
-                return text or None
-
-            # Execute all tool calls in this turn
-            msgs.append(resp)
-            for tc in tool_calls:
-                tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-                tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-                tc_id = tc.get("id", tc_name) if isinstance(tc, dict) else getattr(tc, "id", tc_name)
-                if isinstance(tc_args, str):
-                    try:
-                        tc_args = _json.loads(tc_args)
-                    except Exception:
-                        tc_args = {}
-                logger.info("Musa tool call: %s(%s)", tc_name, tc_args)
-                result = await _execute_musa_tool(tc_name, tc_args)
-                if result == _MUSA_HANDOFF_SENTINEL:
-                    logger.info("Musa handoff_to_agent called — escalating to full agent")
-                    return None  # triggers handoff=True in _quick_chat
-                msgs.append(ToolMessage(content=result, tool_call_id=tc_id))
-
-        # Exhausted iterations — ask for final answer without tools
-        resp = await llm.ainvoke(msgs)
-        text = str(resp.content).strip()
-        return text or None
-
-    except Exception as exc:
-        logger.warning("Cerebras fallback failed: %s", exc)
-        return None
-
-
-async def _quick_chat(message: str) -> tuple[str, bool]:
-    """Ask Musa (Ollama/Cerebras) with soul context. Returns (reply, handoff).
-
-    Routing is handled by should_use_quick_chat() before this is called.
-    Wrapped in a LangSmith RunTree so every quick_chat call is visible as a
-    named 'musa_quick_chat' span in the LangSmith dashboard (not just a bare
-    ChatOpenAI root run).
-    """
-    soul = _load_soul()
-
-    # Open a LangSmith trace span for this quick_chat call.
-    _run_tree = None
-    try:
-        from langsmith.run_trees import RunTree as _RunTree
-        _ls_key = os.environ.get("LANGSMITH_API_KEY", "")
-        _ls_project = os.environ.get("LANGSMITH_PROJECT", "deeperagents")
-        if _ls_key:
-            _run_tree = _RunTree(
-                name="musa_quick_chat",
-                run_type="chain",
-                inputs={"message": message},
-                project_name=_ls_project,
-            )
-            _run_tree.post()
-    except Exception:
-        _run_tree = None
-
-    def _finish(reply: str, handoff: bool) -> tuple[str, bool]:
-        if _run_tree:
-            try:
-                _run_tree.end(outputs={"reply": reply[:200], "handoff": handoff})
-                _run_tree.patch()
-            except Exception:
-                pass
-        return (reply, handoff)
-
-    try:
-        if CHAT_MODEL.startswith("ollama:"):
-            import json as _json
-            model_name = CHAT_MODEL.replace("ollama:", "")
-            ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-            body = _json.dumps({
-                "model": model_name,
-                "messages": [
-                    {"role": "system", "content": soul},
-                    {"role": "user", "content": message},
-                ],
-                "stream": False,
-            })
-            resp = await asyncio.to_thread(
-                requests.post,
-                f"{ollama_url}/api/chat",
-                data=body,
-                headers={"Content-Type": "application/json"},
-                timeout=int(os.environ.get("OLLAMA_TIMEOUT", "120")),
-            )
-            if resp.status_code == 200:
-                text = resp.json().get("message", {}).get("content", "").strip()
-            else:
-                logger.warning("Ollama returned %d — trying Cerebras fallback", resp.status_code)
-                text = await _cerebras_chat(message, soul)
-                if text is None:
-                    return _finish("", True)
-        else:
-            # Non-Ollama: use Cerebras tool loop (has web_search, memory, etc.)
-            # This gives Musa full tool capabilities regardless of chat model.
-            text = await _cerebras_chat(message, soul)
-            if text is None:
-                return _finish("", True)  # fallback failed → hand off
-
-        if not text:
-            return _finish("", True)
-        # If Musa's reply contains a handoff phrase, escalate but keep the text
-        # so the user sees Musa's "On it 🔄" before the full agent starts.
-        if any(phrase in text.lower() for phrase in _HANDOFF_PHRASES):
-            logger.info("Musa handoff phrase detected — escalating to full agent")
-            return _finish(text, True)
-        return _finish(text, False)
-
-    except Exception:
-        logger.warning("Musa quick-chat (Ollama) failed — trying Cerebras fallback")
-        try:
-            text = await _cerebras_chat(message, soul)
-            if text:
-                return _finish(text, False)
-        except Exception:
-            pass
-        return _finish("", True)
 
 
 # ---------------------------------------------------------------------------
@@ -1241,7 +768,8 @@ _MODES_DIR = _REPO / ".deepagents" / "modes"
 # Registry: name → (emoji, one-line description)
 _MODE_REGISTRY: dict[str, tuple[str, str]] = {
     "default":    ("🤖", "FDWA AI assistant — full capabilities"),
-    "content":    ("✍️", "Content writer — blogs, articles, how-to guides"),
+    "analyst":    ("📊", "Data analyst — metrics, trends, cross-platform insights"),
+    "content":    ("✍️", "Content creator — data-informed posts, blogs, campaigns"),
     "researcher": ("🔬", "Deep researcher — exhaustive sourced research"),
     "social":     ("📱", "Social media manager — LinkedIn, Twitter, Instagram"),
     "ralph":      ("🔁", "Autonomous builder — loops until task is done"),
@@ -1598,34 +1126,7 @@ class HeadlessApp:
                 emoji, _ = _MODE_REGISTRY.get(active_mode, ("🎭", active_mode))
                 await _progress(f"{emoji} {active_mode.title()} mode active")
 
-            # ── Quick Chat routing ─────────────────────────────────────────
-            # Simple two-path decision:
-            #   • Quick Chat can handle it → Musa responds instantly
-            #     (if Musa decides to hand off, it says so naturally and
-            #      the full agent picks up automatically)
-            #   • Quick Chat can't handle it → full agent directly
-            #
-            # No decision prompts, no "how would you like me to handle
-            # this?" keyboards. Musa talks or the agent works. Clean.
-            _use_quick = (
-                active_mode == "default"
-                and should_use_quick_chat(message)
-            )
-
-            if _use_quick:
-                logger.info("Quick Chat routing (model=%s): %.60s", CHAT_MODEL, message)
-                await _progress("💬 Quick Chat…")
-
-                quick_reply, handoff = await handle_quick_chat(message)
-                if not handoff and quick_reply:
-                    logger.info("Quick Chat reply to chat_id=%d: %.80s", telegram_chat_id, quick_reply)
-                    self._tg.deliver_reply(telegram_chat_id, quick_reply)
-                    return
-                # Musa handed off → show its message, then full agent continues
-                logger.info("Quick Chat HANDOFF → full agent for chat_id=%d", telegram_chat_id)
-                await _progress(quick_reply or "🔄 On it…")
-            else:
-                await _progress("🤖 Starting…")
+            await _progress("🤖 Starting…")
 
             # ── Full agent run with interrupt loop ───────────────────────────
             from langgraph.types import Command as _LGCommand  # noqa: PLC0415
@@ -2150,24 +1651,18 @@ async def start_api_server(agent: object) -> None:
 
         async with _api_locks[thread_id]:
             try:
-                if should_use_quick_chat(message) and CHAT_MODEL != MODEL:
-                    response, handoff = await handle_quick_chat(message)
-                    if not handoff:
-                        task_store.done(task_id, response)
-                        conversation_store.append(thread_id, "agent", response)
-                        return web.json_response({
-                            "response":  response,
-                            "thread_id": thread_id,
-                            "task_id":   task_id,
-                            "fast_path": True,
-                        })
-                response = await _run_agent(agent, message, thread_id)
+                # Everything goes through the real LangGraph agent.
+                result = await _run_agent(agent, message, thread_id, collect_steps=True)
+                response, _interrupts, steps_info = result  # type: ignore[misc]
                 task_store.done(task_id, response)
                 conversation_store.append(thread_id, "agent", response)
                 return web.json_response({
-                    "response":  response,
-                    "thread_id": thread_id,
-                    "task_id":   task_id,
+                    "response":    response,
+                    "thread_id":   thread_id,
+                    "task_id":     task_id,
+                    "handoff":     False,
+                    "tool_calls":  steps_info.get("tool_calls", []),
+                    "thinking":    steps_info.get("thinking", []),
                 })
             except Exception as exc:
                 logger.exception("HTTP /chat error")
@@ -2217,9 +1712,11 @@ async def start_api_server(agent: object) -> None:
                     content = getattr(msg, "content", "")
                     tools   = getattr(msg, "tool_calls", None)
                 if isinstance(content, list):
+                    # Only include "text" type blocks, skip thinking/reasoning
                     content = " ".join(
                         b.get("text", "") if isinstance(b, dict) else str(b)
                         for b in content
+                        if not isinstance(b, dict) or b.get("type", "text") == "text"
                     )
                 if role in ("human", "HumanMessage"):
                     messages.append({"role": "user",  "text": str(content)})
@@ -2238,9 +1735,256 @@ async def start_api_server(agent: object) -> None:
             fallback = conversation_store.get_history(thread_id)
             return web.json_response({"messages": fallback, "thread_id": thread_id})
 
+    # ------------------------------------------------------------------
+    # SSE streaming endpoint — mirrors what the CLI shows in real time
+    # ------------------------------------------------------------------
+    async def chat_stream(request: web.Request) -> web.StreamResponse:
+        """Server-Sent Events streaming endpoint for the dashboard.
+
+        Sends these event types:
+          status   — spinner state ("thinking", "tool:name", null)
+          text     — streaming text chunk from the AI
+          tool_start — tool call began {id, name, args}
+          tool_end   — tool call finished {id, status, output}
+          handoff  — Musa passed to main agent
+          done     — stream complete {response}
+          error    — something broke {message}
+        """
+        if not _check_secret(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        message: str = (data.get("message") or "").strip()
+        raw_thread: str = (data.get("thread_id") or "dashboard-default").strip()
+        thread_id = _to_uuid(raw_thread)
+        if not message:
+            return web.json_response({"error": "message is required"}, status=400)
+
+        if thread_id not in _api_locks:
+            _api_locks[thread_id] = asyncio.Lock()
+
+        resp = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+        await resp.prepare(request)
+
+        async def _send_event(event: str, data_payload: object) -> None:
+            line = f"event: {event}\ndata: {json.dumps(data_payload, default=str)}\n\n"
+            await resp.write(line.encode("utf-8"))
+
+        task_id = str(uuid.uuid4())
+        task_store.start(task_id, thread_id, message, source="dashboard")
+        conversation_store.append(thread_id, "user", message)
+
+        async with _api_locks[thread_id]:
+            try:
+                # Everything goes through the real LangGraph agent — no bypass.
+                # Streaming logic matches local_dashboard_server.py exactly.
+                await _send_event("status", {"state": "thinking", "model": MODEL})
+
+                config: dict = {"configurable": {"thread_id": thread_id}}
+                agent_input = {"messages": [{"role": "user", "content": message}]}
+                pending_tool_calls: dict[str, dict] = {}
+                full_response_text = ""
+                _seen_content: set = set()  # deduplicate text across stream modes
+
+                async def _process_updates_messages(msgs: list) -> None:
+                    nonlocal full_response_text
+                    for msg in msgs:
+                        msg_type = getattr(msg, "type", "") or (msg.get("type", "") if isinstance(msg, dict) else "")
+
+                        tc_list = getattr(msg, "tool_calls", None) or (msg.get("tool_calls") if isinstance(msg, dict) else None)
+                        if tc_list:
+                            for tc in tc_list:
+                                tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                                tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                                tc_id = tc.get("id", tc_name) if isinstance(tc, dict) else getattr(tc, "id", tc_name)
+                                if tc_name and tc_id not in pending_tool_calls:
+                                    pending_tool_calls[tc_id] = {"name": tc_name, "args": tc_args}
+                                    await _send_event("tool_start", {"id": tc_id, "name": tc_name, "args": tc_args})
+                                    await _send_event("status", {"state": f"tool:{tc_name}"})
+
+                        if msg_type in ("tool", "ToolMessage"):
+                            tool_name = getattr(msg, "name", None) or (msg.get("name") if isinstance(msg, dict) else None)
+                            tool_id = getattr(msg, "tool_call_id", None) or (msg.get("tool_call_id") if isinstance(msg, dict) else None)
+                            content = getattr(msg, "content", "") or (msg.get("content", "") if isinstance(msg, dict) else "")
+                            status_val = getattr(msg, "status", "success") or "success"
+                            await _send_event("tool_end", {
+                                "id": tool_id or tool_name or "unknown",
+                                "name": tool_name or "tool",
+                                "status": status_val,
+                                "output": str(content)[:500],
+                            })
+                            pending_tool_calls.pop(tool_id, None)
+                            if not pending_tool_calls:
+                                await _send_event("status", {"state": "thinking"})
+
+                        # AI text content (not tool calls) — filter out thinking/reasoning
+                        if msg_type in ("ai", "AIMessage") and not tc_list:
+                            # NVIDIA Nemotron puts reasoning into both content AND
+                            # additional_kwargs.reasoning_content — detect and skip.
+                            _additional = getattr(msg, "additional_kwargs", None) or (msg.get("additional_kwargs") if isinstance(msg, dict) else None) or {}
+                            _reasoning = _additional.get("reasoning_content") or _additional.get("reasoning") or ""
+
+                            blocks = getattr(msg, "content_blocks", None)
+                            if blocks:
+                                for block in blocks:
+                                    if block.get("type") == "text":
+                                        text = block.get("text", "")
+                                        if text.strip() and text.strip() != _reasoning.strip():
+                                            _h = hash(text.strip())
+                                            if _h not in _seen_content:
+                                                _seen_content.add(_h)
+                                                await _send_event("text", {"content": text})
+                                                full_response_text += text
+                            else:
+                                content = getattr(msg, "content", "") or (msg.get("content", "") if isinstance(msg, dict) else "")
+                                if isinstance(content, list):
+                                    for block in content:
+                                        if isinstance(block, dict) and block.get("type") == "text":
+                                            text = block.get("text", "")
+                                            if text.strip() and text.strip() != _reasoning.strip():
+                                                _h = hash(text.strip())
+                                                if _h not in _seen_content:
+                                                    _seen_content.add(_h)
+                                                    await _send_event("text", {"content": text})
+                                                    full_response_text += text
+                                elif isinstance(content, str) and content.strip():
+                                    # Skip if content IS the reasoning (Nemotron leak)
+                                    if _reasoning and content.strip() == _reasoning.strip():
+                                        continue
+                                    import re as _re
+                                    if _re.fullmatch(r'[a-zA-Z_]\w*\([^)]*\)', content.strip()):
+                                        continue
+                                    _h = hash(content.strip())
+                                    if _h not in _seen_content:
+                                        _seen_content.add(_h)
+                                        await _send_event("text", {"content": content})
+                                        full_response_text += content
+
+                try:
+                    stream = agent.astream(
+                        agent_input,
+                        config=config,
+                        stream_mode=["messages", "updates"],
+                        subgraphs=True,
+                    )
+                except TypeError:
+                    stream = agent.astream(agent_input, config=config)
+
+                async for chunk in stream:
+                    if isinstance(chunk, tuple) and len(chunk) == 3:
+                        namespace, mode, chunk_data = chunk
+                        ns_key = tuple(namespace) if namespace else ()
+                        is_main_agent = ns_key == ()
+
+                        if mode == "updates" and isinstance(chunk_data, dict):
+                            if "__interrupt__" in chunk_data:
+                                await _send_event("status", {"state": "interrupted"})
+                                break
+                            if is_main_agent:
+                                for node_name, node_data in chunk_data.items():
+                                    if node_name.startswith("__") or not isinstance(node_data, dict):
+                                        continue
+                                    await _process_updates_messages(node_data.get("messages", []))
+
+                        elif mode == "messages":
+                            if not is_main_agent:
+                                continue
+                            if not isinstance(chunk_data, tuple) or len(chunk_data) != 2:
+                                continue
+                            msg_obj, _metadata = chunk_data
+                            msg_type = getattr(msg_obj, "type", "") or ""
+
+                            # Text handled by updates mode — only process tool calls here
+                            tc_list = getattr(msg_obj, "tool_calls", None) or []
+                            for tc in tc_list:
+                                tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                                tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                                tc_id = tc.get("id", tc_name) if isinstance(tc, dict) else getattr(tc, "id", tc_name)
+                                if tc_name and tc_id not in pending_tool_calls:
+                                    pending_tool_calls[tc_id] = {"name": tc_name, "args": tc_args}
+                                    await _send_event("tool_start", {"id": tc_id, "name": tc_name, "args": tc_args})
+                                    await _send_event("status", {"state": f"tool:{tc_name}"})
+
+                            if msg_type in ("tool", "ToolMessage"):
+                                tool_name = getattr(msg_obj, "name", None)
+                                tool_id = getattr(msg_obj, "tool_call_id", None)
+                                content_val = getattr(msg_obj, "content", "")
+                                status_val = getattr(msg_obj, "status", "success") or "success"
+                                await _send_event("tool_end", {
+                                    "id": tool_id or tool_name or "unknown",
+                                    "name": tool_name or "tool",
+                                    "status": status_val,
+                                    "output": str(content_val)[:500],
+                                })
+                                pending_tool_calls.pop(tool_id, None)
+                                if not pending_tool_calls:
+                                    await _send_event("status", {"state": "thinking"})
+
+                    elif isinstance(chunk, dict):
+                        if "__interrupt__" in chunk:
+                            await _send_event("status", {"state": "interrupted"})
+                            break
+                        for node_name, node_data in chunk.items():
+                            if node_name.startswith("__"):
+                                continue
+                            if isinstance(node_data, dict):
+                                await _process_updates_messages(node_data.get("messages", []))
+
+                # Get the final response text from state if streaming didn't capture it
+                if not full_response_text.strip():
+                    state = await agent.aget_state(config)  # type: ignore[union-attr]
+                    if state:
+                        messages_list = getattr(state, "values", {}).get("messages", [])
+                        for msg in reversed(messages_list):
+                            text = _text_from_message(msg)
+                            if text.strip():
+                                full_response_text = text.strip()
+                                break
+                        # Fallback to any content
+                        if not full_response_text.strip():
+                            for msg in reversed(messages_list):
+                                content = getattr(msg, "content", "") if not isinstance(msg, dict) else msg.get("content", "")
+                                if isinstance(content, str) and content.strip():
+                                    full_response_text = content.strip()
+                                    break
+
+                final_response = full_response_text.strip() or "No response received."
+                task_store.done(task_id, final_response)
+                conversation_store.append(thread_id, "agent", final_response)
+                await _send_event("done", {
+                    "response": final_response,
+                    "thread_id": thread_id,
+                    "task_id": task_id,
+                    "handoff": False,
+                })
+            except Exception as exc:
+                logger.exception("SSE /chat/stream error")
+                task_store.fail(task_id, str(exc))
+                await _send_event("error", {"message": str(exc)})
+
+        try:
+            await resp.write_eof()
+        except Exception:
+            pass
+        return resp
+
     app = web.Application()
     app.router.add_get("/health", health)
     app.router.add_post("/chat", chat)
+    app.router.add_post("/chat/stream", chat_stream)
     app.router.add_get("/tasks", tasks_handler)
     app.router.add_get("/history/{thread_id}", history_handler)
 
@@ -2291,10 +2035,20 @@ async def main() -> None:
     except Exception:
         pass
 
+    # Register default autonomous workflows (cron jobs) on first boot
+    try:
+        from default_workflows import register_default_workflows
+        registered = register_default_workflows()
+        if registered:
+            logger.info("Registered %d new default workflow(s)", registered)
+    except Exception:
+        logger.warning("Failed to register default workflows", exc_info=True)
+
     async with server_session(
         assistant_id=AGENT_ID,
         model_name=MODEL,
         auto_approve=AUTO_APPROVE,
+        sandbox_type=SANDBOX_TYPE,
         enable_shell=ENABLE_SHELL,
         interactive=True,
         enable_memory=True,

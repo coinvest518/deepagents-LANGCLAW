@@ -17,13 +17,14 @@ services:
     # startCommand: python deploy/telegram_bot.py
     healthCheckPath: /health
 
-    # ── Disk (optional but recommended) ───────────────────────────────────────
-    # Uncomment to add a 1 GB persistent disk so session history, cron jobs,
-    # and the workspace .venv survive service restarts.
-    # disk:
-    #   name: deepagents-data
-    #   mountPath: /root/.deepagents
-    #   sizeGB: 1
+    # ── Disk (REQUIRED for persistent context) ───────────────────────────────
+    # Without this disk, the LangGraph checkpointer DB at /root/.deepagents/
+    # sessions.db gets wiped on every redeploy — conversation history, cron
+    # jobs, and the workspace .venv all disappear. Keep this enabled.
+    disk:
+      name: deepagents-data
+      mountPath: /root/.deepagents
+      sizeGB: 1
 
     # ── Environment variables ─────────────────────────────────────────────────
     # Set SECRET values in the Render dashboard (never commit them here).
@@ -34,8 +35,15 @@ services:
       # Override: set DA_MODEL in dashboard to force a specific model.
       - key: DA_AUTO_APPROVE
         value: "1"
-      - key: DA_ENABLE_SHELL
-        value: "0"
+      # Sandbox mode for filesystem/shell tools.
+      #   "none"    — runs in the Render container (shell controlled by DA_ENABLE_SHELL)
+      #   "daytona" — per-session ephemeral remote sandbox (requires DAYTONA_API_KEY)
+      # When USE_SANDBOX=daytona, shell defaults to enabled (safe in the sandbox).
+      - key: USE_SANDBOX
+        value: "daytona"
+      # Override shell enable explicitly if you want to force it on/off.
+      # - key: DA_ENABLE_SHELL
+      #   value: "1"
       # LangSmith — set these in the Render dashboard for tracing/dashboard
       # - key: LANGSMITH_API_KEY          (required for tracing)
       # - key: LANGSMITH_PROJECT          (project name, e.g. "deepagents")
