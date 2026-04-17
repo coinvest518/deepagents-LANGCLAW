@@ -70,23 +70,30 @@ export default function CommandCenter() {
   const [traceSpans, setTraceSpans] = useState<TraceSpan[]>([])
   const [traceLoading, setTraceLoading] = useState(false)
 
+  // Core load: LangGraph traces + crypto prices — runs every 60s
   const load = useCallback(async () => {
     try {
-      const [r, s, p, w, g] = await Promise.allSettled([
+      const [r, s, p] = await Promise.allSettled([
         fetch('/api/langsmith?type=runs').then(r => r.json()),
         fetch('/api/langsmith?type=stats').then(r => r.json()),
         fetch('/api/alchemy?type=prices').then(r => r.json()),
-        fetch('/api/alchemy?type=wallet').then(r => r.json()),
-        fetch('/api/alchemy?type=gas').then(r => r.json()),
       ])
       if (r.status === 'fulfilled' && !r.value.error) setRuns(r.value.runs || [])
       if (s.status === 'fulfilled' && !s.value.error) setStats(s.value)
       if (p.status === 'fulfilled') setPrices(p.value.prices || [])
-      if (w.status === 'fulfilled' && !w.value.error) setWallet(w.value)
-      if (g.status === 'fulfilled') setGas(g.value.gas || [])
     } finally {
       setLoading(false)
     }
+  }, [])
+
+  // Slow load: wallet balances + gas prices — expensive RPC calls, runs every 5 min
+  const loadWalletGas = useCallback(async () => {
+    const [w, g] = await Promise.allSettled([
+      fetch('/api/alchemy?type=wallet').then(r => r.json()),
+      fetch('/api/alchemy?type=gas').then(r => r.json()),
+    ])
+    if (w.status === 'fulfilled' && !w.value.error) setWallet(w.value)
+    if (g.status === 'fulfilled') setGas(g.value.gas || [])
   }, [])
 
   const loadTrace = useCallback(async (runId: string) => {
@@ -103,10 +110,12 @@ export default function CommandCenter() {
 
   useEffect(() => {
     load()
+    loadWalletGas()  // initial load on mount
     const iv = setInterval(() => { load(); setTick(t => t+1) }, 60000)
+    const walletIv = setInterval(loadWalletGas, 300_000)  // wallet+gas every 5 min
     const clock = setInterval(() => setTime(new Date().toUTCString().slice(0,25)), 1000)
-    return () => { clearInterval(iv); clearInterval(clock) }
-  }, [load])
+    return () => { clearInterval(iv); clearInterval(walletIv); clearInterval(clock) }
+  }, [load, loadWalletGas])
 
   const activeRuns = runs.filter(r => r.status === 'running')
   const recentRuns = runs.slice(0, 12)
@@ -120,9 +129,24 @@ export default function CommandCenter() {
       <header className="flex items-center justify-between mb-6 border-b border-hud-border pb-3">
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-hud-cyan glow-cyan dot-live" />
-            <span className="text-hud-cyan font-bold text-lg tracking-widest">DEEPAGENTS</span>
-            <span className="text-hud-text/40 text-xs">COMMAND CENTER</span>
+            {/* Logo mark */}
+            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" className="shrink-0">
+              {/* Claw outer ring */}
+              <circle cx="14" cy="14" r="13" stroke="#00d4ff" strokeWidth="1" opacity="0.4" />
+              {/* Claw tines */}
+              <path d="M14 4 C14 4 10 9 10 14" stroke="#00d4ff" strokeWidth="1.5" strokeLinecap="round" />
+              <path d="M14 4 C14 4 14 10 14 14" stroke="#00ff88" strokeWidth="1.5" strokeLinecap="round" />
+              <path d="M14 4 C14 4 18 9 18 14" stroke="#00d4ff" strokeWidth="1.5" strokeLinecap="round" />
+              {/* Center node */}
+              <circle cx="14" cy="14" r="2.5" fill="#00ff88" opacity="0.9" />
+              <circle cx="14" cy="14" r="4" stroke="#00ff88" strokeWidth="0.5" opacity="0.5" />
+              {/* Bottom arc */}
+              <path d="M8 18 Q14 24 20 18" stroke="#00d4ff" strokeWidth="1" strokeLinecap="round" fill="none" opacity="0.6" />
+            </svg>
+            <div className="flex flex-col leading-none">
+              <span className="text-hud-cyan font-bold text-sm tracking-widest">FDWA <span className="text-hud-green">LANGCLAW</span></span>
+              <span className="text-hud-text/50 text-[9px] tracking-widest uppercase">Deep Agents Command Center</span>
+            </div>
           </div>
           <div className="hidden md:flex gap-2 text-[9px] text-hud-text/40 tracking-widest">
             <span className="border border-hud-border px-2 py-0.5 rounded">v1.0</span>
@@ -260,11 +284,11 @@ export default function CommandCenter() {
         </Panel>
       </div>
 
-      {/* ── Chat + Activity ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
-        {/* Agent Chat */}
+      {/* ── Chat ── */}
+      <div className="mb-4">
+        {/* Agent Chat — full width, tall */}
         <Panel title="AGENT CHAT" tag="DIRECT CONTROL" className="glow-cyan" >
-          <div className="flex flex-col" style={{ height: '380px' }}>
+          <div className="flex flex-col" style={{ height: '600px' }}>
             <ChatPanel />
           </div>
         </Panel>
@@ -363,21 +387,49 @@ export default function CommandCenter() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
 
         {/* Subagents */}
-        <Panel title="SUBAGENT HIERARCHY" tag="WORKERS">
-          <div className="space-y-2">
-            {runs.filter(r => r.parent_run_id).slice(0, 8).map(r => (
-              <div key={r.id} className="flex items-center gap-2 text-[10px] border-b border-hud-border/20 pb-1">
-                <span style={{ color: STATUS_COLOR[r.status] || '#a8c4d4' }}>◆</span>
-                <span className="text-hud-text/70 truncate flex-1">{r.name || r.run_type}</span>
-                <span className="text-hud-cyan text-[9px]">{fmt(r.total_tokens)}t</span>
-              </div>
-            ))}
-            {runs.filter(r => r.parent_run_id).length === 0 && (
-              <div className="text-hud-text/30 text-xs">No subagent runs in window</div>
-            )}
+        <Panel title="AUTONOMOUS AGENTS" tag="SUB-AGENTS">
+          {/* Pre-defined agent roster */}
+          <div className="space-y-2 mb-3">
+            {[
+              { name: 'analyst', role: 'CFO / Data', icon: '📊', desc: 'Cross-platform analytics' },
+              { name: 'content-creator', role: 'CMO / Creator', icon: '✍️', desc: 'Content generation' },
+              { name: 'ops-monitor', role: 'CTO / SRE', icon: '🔧', desc: 'System health' },
+              { name: 'web-scraper', role: 'Research', icon: '🔍', desc: 'Multi-source scraping' },
+              { name: 'composio-worker', role: 'Bulk Ops', icon: '⚡', desc: 'Batch API calls' },
+            ].map(agent => {
+              const agentRuns = runs.filter(r => r.name?.toLowerCase().includes(agent.name) || r.parent_run_id)
+              const active = agentRuns.some(r => r.status === 'running')
+              const lastRun = agentRuns[0]
+              return (
+                <div key={agent.name} className={`flex items-center gap-2 text-[10px] border-b border-hud-border/20 pb-1 ${active ? 'bg-hud-cyan/5' : ''}`}>
+                  <span>{agent.icon}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1">
+                      <span className="text-hud-text/80 font-bold">{agent.name}</span>
+                      {active && <LiveDot color="#00ff88" />}
+                    </div>
+                    <span className="text-hud-text/40 text-[8px]">{agent.desc}</span>
+                  </div>
+                  <span className="text-hud-text/40 text-[8px]">{agent.role}</span>
+                </div>
+              )
+            })}
           </div>
-          <div className="mt-3 pt-2 border-t border-hud-border/30 text-[9px] text-hud-text/40">
-            SUBAGENTS DETECTED: {runs.filter(r => r.parent_run_id).length}
+          {/* Recent sub-agent activity */}
+          <div className="border-t border-hud-border/30 pt-2">
+            <span className="text-[8px] text-hud-text/40 tracking-wider">RECENT ACTIVITY</span>
+            <div className="space-y-1 mt-1">
+              {runs.filter(r => r.parent_run_id).slice(0, 5).map(r => (
+                <div key={r.id} className="flex items-center gap-2 text-[9px]">
+                  <span style={{ color: STATUS_COLOR[r.status] || '#a8c4d4' }}>◆</span>
+                  <span className="text-hud-text/60 truncate flex-1">{r.name || r.run_type}</span>
+                  <span className="text-hud-cyan">{fmt(r.total_tokens)}t</span>
+                </div>
+              ))}
+              {runs.filter(r => r.parent_run_id).length === 0 && (
+                <div className="text-hud-text/30 text-[9px]">No sub-agent runs yet</div>
+              )}
+            </div>
           </div>
         </Panel>
 
@@ -391,13 +443,15 @@ export default function CommandCenter() {
           <div className="space-y-2 text-[10px]">
             {[
               { k: 'DEPLOYMENT', v: 'Render (Docker)', c: 'text-hud-green' },
+              { k: 'AGENTS', v: '5 sub-agents', c: 'text-hud-cyan' },
+              { k: 'TRACING', v: 'LangSmith (ops-monitor)', c: 'text-hud-cyan' },
+              { k: 'ANALYTICS', v: 'Analyst agent', c: 'text-hud-green' },
+              { k: 'CONTENT', v: 'Creator agent', c: 'text-hud-green' },
               { k: 'MEMORY', v: 'Mem0 + AstraDB', c: 'text-hud-cyan' },
-              { k: 'TRACING', v: 'LangSmith', c: 'text-hud-cyan' },
+              { k: 'COMPOSIO', v: '17+ services', c: 'text-hud-green' },
               { k: 'CHAT', v: 'Telegram Bot', c: 'text-hud-blue' },
               { k: 'WALLET', v: '0xAfF9...3439', c: 'text-hud-amber' },
-              { k: 'NETWORKS', v: 'ETH+Base+Poly+Arb+Opt', c: 'text-hud-text' },
-              { k: 'COMPOSIO', v: '8 toolkits active', c: 'text-hud-green' },
-              { k: 'AUTO-APPROVE', v: 'ENABLED', c: 'text-hud-amber' },
+              { k: 'WORKFLOWS', v: '4 cron jobs', c: 'text-hud-amber' },
             ].map(({ k, v, c }) => (
               <div key={k} className="flex justify-between items-center border-b border-hud-border/20 pb-1">
                 <span className="text-hud-text/50 tracking-wider">{k}</span>
@@ -413,8 +467,8 @@ export default function CommandCenter() {
 
       {/* Footer */}
       <footer className="mt-6 pt-3 border-t border-hud-border/30 flex justify-between text-[9px] text-hud-text/25 tracking-widest">
-        <span>DEEPAGENTS COMMAND CENTER — COINVEST518</span>
-        <span>POWERED BY LANGSMITH · ALCHEMY · MISTRAL</span>
+        <span>FDWA LANGCLAW — DEEP AGENTS COMMAND CENTER</span>
+        <span>POWERED BY LANGSMITH · ALCHEMY · LANGGRAPH</span>
       </footer>
     </div>
 

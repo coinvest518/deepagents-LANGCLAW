@@ -8,7 +8,7 @@ async function rpc(network: string, method: string, params: any[]) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', method, params, id: 1 }),
-    next: { revalidate: 10 },
+    next: { revalidate: 60 },
   })
   const d = await res.json()
   return d.result
@@ -23,7 +23,7 @@ export async function GET(req: Request) {
       const symbols = ['ETH', 'BTC', 'USDC', 'MATIC']
       const qs = symbols.map(s => `symbols=${s}`).join('&')
       const res = await fetch(`https://api.g.alchemy.com/prices/v1/${KEY}/tokens/by-symbol?${qs}`, {
-        next: { revalidate: 30 },
+        next: { revalidate: 60 },
       })
       const data = await res.json()
       const prices = (data.data || []).map((item: any) => ({

@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'DeepAgents Command Center',
-  description: 'Tony Stark HUD — AI Agent Intelligence Dashboard',
+  title: 'FDWA LangClaw — Deep Agents Command Center',
+  description: 'FDWA Futuristic Digital Wealth Agency — LangClaw AI Command Center',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
