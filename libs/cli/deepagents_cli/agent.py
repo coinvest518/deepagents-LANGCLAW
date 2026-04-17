@@ -814,21 +814,41 @@ def create_cli_agent(
         )
 
     # Add skills middleware
+    # Build virtual-path skill routes so skill paths are portable (e.g.,
+    # /skills/built-in/notion/SKILL.md) instead of Windows absolute paths
+    # (C:\Users\...) that validate_path() would reject at tool-call time.
+    # The same routes are merged into the main composite_backend below so
+    # that agent read_file calls on those virtual paths route to real files.
+    skill_routes: dict[str, FilesystemBackend] = {}
     if enable_skills:
         # Lowest to highest precedence:
         # built-in -> user .deepagents -> user .agents
         # -> project .deepagents -> project .agents
-        sources = [str(settings.get_built_in_skills_dir())]
-        sources.extend([str(skills_dir), str(user_agent_skills_dir)])
+        _skill_source_map: list[tuple[str, Path]] = [
+            ("/skills/built-in/", settings.get_built_in_skills_dir()),
+            ("/skills/user/", skills_dir),
+            ("/skills/agent/", user_agent_skills_dir),
+        ]
         if project_skills_dir:
-            sources.append(str(project_skills_dir))
+            _skill_source_map.append(("/skills/project/", project_skills_dir))
         if project_agent_skills_dir:
-            sources.append(str(project_agent_skills_dir))
+            _skill_source_map.append(("/skills/project-agent/", project_agent_skills_dir))
+
+        skill_routes = {
+            prefix: FilesystemBackend(root_dir=real_dir, virtual_mode=True)
+            for prefix, real_dir in _skill_source_map
+        }
+        skill_sources = list(skill_routes.keys())
 
         agent_middleware.append(
             SkillsMiddleware(
-                backend=FilesystemBackend(),
-                sources=sources,
+                backend=CompositeBackend(
+                    default=FilesystemBackend(
+                        root_dir=settings.get_built_in_skills_dir(), virtual_mode=True
+                    ),
+                    routes=skill_routes,
+                ),
+                sources=skill_sources,
             )
         )
 
@@ -899,18 +919,25 @@ def create_cli_agent(
             root_dir=tempfile.mkdtemp(prefix="deepagents_conversation_history_"),
             virtual_mode=True,
         )
+        workspace_backend = FilesystemBackend(root_dir=root_dir, virtual_mode=True)
         composite_backend = CompositeBackend(
             default=backend,
             routes={
+                "/workspace/": workspace_backend,
                 "/large_tool_results/": large_results_backend,
                 "/conversation_history/": conversation_history_backend,
+                # Skills routes: let agent read_file calls on virtual skill paths
+                # (e.g., /skills/built-in/notion/SKILL.md) route to real files.
+                **skill_routes,
             },
         )
     else:
         # Sandbox mode: No special routing needed
         composite_backend = CompositeBackend(
             default=backend,
-            routes={},
+            routes={
+                **skill_routes,
+            },
         )
 
     from deepagents.middleware.summarization import create_summarization_tool_middleware

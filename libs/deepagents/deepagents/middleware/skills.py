@@ -92,7 +92,7 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated
 
 import yaml
@@ -380,6 +380,37 @@ def _validate_metadata(
     return {str(k): str(v) for k, v in raw.items()}
 
 
+def _to_virtual_path(absolute_path: str) -> str:
+    """Convert an absolute filesystem path to a virtual `/skills/...` path.
+
+    The backend returns OS-native paths (e.g.
+    `C:/Users/.../skills/built-in/notion/SKILL.md`). The LLM must see virtual
+    paths (`/skills/built-in/notion/SKILL.md`) so it uses `read_file` correctly.
+
+    Args:
+        absolute_path: Absolute or posix-ified path from the backend.
+
+    Returns:
+        Virtual path starting with `/skills/` if the marker is found,
+        otherwise the original path with a leading `/`.
+    """
+    # Normalise to forward slashes (handles Windows backslash paths)
+    normalized = absolute_path.replace("\\", "/")
+
+    # Find the `/skills/` boundary and return everything from there
+    marker = "/skills/"
+    idx = normalized.find(marker)
+    if idx != -1:
+        return normalized[idx:]
+
+    # Fallback: if the path already starts with `/skills/`, return as-is
+    if normalized.startswith("/skills/"):
+        return normalized
+
+    # Last resort: return with leading slash (shouldn't normally happen)
+    return f"/{normalized.lstrip('/')}"
+
+
 def _format_skill_annotations(skill: SkillMetadata) -> str:
     """Build a parenthetical annotation string from optional skill fields.
 
@@ -440,8 +471,11 @@ def _list_skills(backend: BackendProtocol, source_path: str) -> list[SkillMetada
     # For each skill directory, check if SKILL.md exists and download it
     skill_md_paths = []
     for skill_dir_path in skill_dirs:
-        # Construct SKILL.md path using PurePosixPath for safe, standardized path operations
-        skill_dir = PurePosixPath(skill_dir_path)
+        # Normalise to POSIX forward-slashes before using PurePosixPath so that
+        # Windows absolute paths like C:\Users\...\notion/ are handled correctly
+        # on all platforms (as_posix() is a no-op on Linux/macOS).
+        posix_dir = Path(skill_dir_path).as_posix()
+        skill_dir = PurePosixPath(posix_dir)
         skill_md_path = str(skill_dir / "SKILL.md")
         skill_md_paths.append((skill_dir_path, skill_md_path))
 
@@ -464,8 +498,9 @@ def _list_skills(backend: BackendProtocol, source_path: str) -> list[SkillMetada
             logger.warning("Error decoding %s: %s", skill_md_path, e)
             continue
 
-        # Extract directory name from path using PurePosixPath
-        directory_name = PurePosixPath(skill_dir_path).name
+        # Extract directory name from path — normalise to POSIX first so Windows
+        # absolute paths resolve correctly on all platforms.
+        directory_name = PurePosixPath(Path(skill_dir_path).as_posix()).name
 
         # Parse metadata
         skill_metadata = _parse_skill_metadata(
@@ -518,8 +553,11 @@ async def _alist_skills(backend: BackendProtocol, source_path: str) -> list[Skil
     # For each skill directory, check if SKILL.md exists and download it
     skill_md_paths = []
     for skill_dir_path in skill_dirs:
-        # Construct SKILL.md path using PurePosixPath for safe, standardized path operations
-        skill_dir = PurePosixPath(skill_dir_path)
+        # Normalise to POSIX forward-slashes before using PurePosixPath so that
+        # Windows absolute paths like C:\Users\...\notion/ are handled correctly
+        # on all platforms (as_posix() is a no-op on Linux/macOS).
+        posix_dir = Path(skill_dir_path).as_posix()
+        skill_dir = PurePosixPath(posix_dir)
         skill_md_path = str(skill_dir / "SKILL.md")
         skill_md_paths.append((skill_dir_path, skill_md_path))
 
@@ -542,8 +580,9 @@ async def _alist_skills(backend: BackendProtocol, source_path: str) -> list[Skil
             logger.warning("Error decoding %s: %s", skill_md_path, e)
             continue
 
-        # Extract directory name from path using PurePosixPath
-        directory_name = PurePosixPath(skill_dir_path).name
+        # Extract directory name from path — normalise to POSIX first so Windows
+        # absolute paths resolve correctly on all platforms.
+        directory_name = PurePosixPath(Path(skill_dir_path).as_posix()).name
 
         # Parse metadata
         skill_metadata = _parse_skill_metadata(
@@ -574,26 +613,28 @@ You have access to a skills library that provides specialized capabilities and d
 Skills follow a **progressive disclosure** pattern - you see their name and description above, but only read full instructions when needed:
 
 1. **Recognize when a skill applies**: Check if the user's task matches a skill's description
-2. **Read the skill's full instructions**: Use the path shown in the skill list above
+2. **Read the skill's full instructions**: Use the exact virtual path shown in the skill list above (e.g. `/skills/built-in/notion/SKILL.md`)
 3. **Follow the skill's instructions**: SKILL.md contains step-by-step workflows, best practices, and examples
-4. **Access supporting files**: Skills may include helper scripts, configs, or reference docs - use absolute paths
+4. **Access supporting files**: Skills may include helper scripts — run them with `python scripts/...` relative paths
+
+**PATH RULES — CRITICAL:**
+- All skill paths start with `/skills/` — use them EXACTLY as shown above
+- NEVER use drive-letter paths (e.g. C:/Users/.../SKILL.md) — they always fail
+- NEVER use backslashes — only forward slashes
+- If a path is shown as `/skills/built-in/notion/SKILL.md`, call `read_file` with that exact string
 
 **When to Use Skills:**
 - User's request matches a skill's domain (e.g., "research X" -> web-research skill)
 - You need specialized knowledge or structured workflows
 - A skill provides proven patterns for complex tasks
 
-**Executing Skill Scripts:**
-Skills may contain Python scripts or other executable files. Always use absolute paths from the skill list.
-
 **Example Workflow:**
 
 User: "Can you research the latest developments in quantum computing?"
 
-1. Check available skills -> See "web-research" skill with its path
-2. Read the skill using the path shown
+1. Check available skills -> See "web-research" skill listed above
+2. `read_file("/skills/built-in/web-research/SKILL.md")` — use the exact path from the list
 3. Follow the skill's research workflow (search -> organize -> synthesize)
-4. Use any helper scripts with absolute paths
 
 Remember: Skills make you more capable and consistent. When in doubt, check if a skill exists for the task!
 """
@@ -701,7 +742,7 @@ class SkillsMiddleware(AgentMiddleware[SkillsState, ContextT, ResponseT]):
             lines.append(desc_line)
             if skill["allowed_tools"]:
                 lines.append(f"  -> Allowed tools: {', '.join(skill['allowed_tools'])}")
-            lines.append(f"  -> Read `{skill['path']}` for full instructions")
+            lines.append(f"  -> Read `{_to_virtual_path(skill['path'])}` for full instructions")
 
         return "\n".join(lines)
 

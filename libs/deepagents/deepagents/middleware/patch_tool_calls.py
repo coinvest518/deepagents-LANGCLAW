@@ -19,6 +19,8 @@ _COERCE_ARGS: dict[str, dict[str, str]] = {
     "web_search": {"session_params": "dict", "crawl_params": "dict"},
     "GOOGLESHEETS_BATCH_GET": {"ranges": "list"},
     "GOOGLESHEETS_BATCH_UPDATE": {"data": "list"},
+    "search_database": {"query_filter": "dict"},
+    "save_to_database": {"data": "dict"},
 }
 
 # String values that represent "no value" — open-weight LLMs send these
@@ -93,7 +95,7 @@ def _coerce_tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
         changed = True
         logger.debug("Stripped null-string args from %s: remaining keys %s", name, list(args.keys()))
 
-    # Pass 2 — per-tool type coercion
+    # Pass 2 — per-tool type coercion (explicit map)
     coerce_map = _COERCE_ARGS.get(name, {})
     for arg_name, expected_type in coerce_map.items():
         val = args.get(arg_name)
@@ -121,6 +123,23 @@ def _coerce_tool_call_args(tool_call: dict[str, Any]) -> dict[str, Any]:
             else:
                 args.pop(arg_name, None)
                 changed = True
+
+    # Pass 3 — generic: any string arg that looks like a JSON dict or list,
+    # try to parse it.  Catches tools not yet in _COERCE_ARGS.
+    for arg_name, val in list(args.items()):
+        if not isinstance(val, str) or arg_name in coerce_map:
+            continue
+        stripped = val.strip()
+        if (stripped.startswith("{") and stripped.endswith("}")) or \
+           (stripped.startswith("[") and stripped.endswith("]")):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, (dict, list)):
+                    args[arg_name] = parsed
+                    changed = True
+                    logger.debug("Generic JSON coercion for %s.%s", name, arg_name)
+            except (json.JSONDecodeError, ValueError):
+                pass
 
     if not changed:
         return tool_call

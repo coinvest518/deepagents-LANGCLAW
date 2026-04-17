@@ -48,10 +48,13 @@ Use a **plain tool** when:
 """
 
 from deepagents.middleware.async_subagents import AsyncSubAgent, AsyncSubAgentJob, AsyncSubAgentMiddleware
+from deepagents.middleware.early_exit_prevention import EarlyExitPreventionMiddleware
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.loop_detection import LoopDetectionMiddleware
 from deepagents.middleware.memory import MemoryMiddleware
+from deepagents.middleware.reasoning_filter import ReasoningFilterMiddleware
 from deepagents.middleware.reflection import ReflectionMiddleware
+from deepagents.middleware.self_correction import SelfCorrectionMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent, SubAgentMiddleware
 from deepagents.middleware.summarization import (
@@ -65,10 +68,13 @@ __all__ = [
     "AsyncSubAgentJob",
     "AsyncSubAgentMiddleware",
     "CompiledSubAgent",
+    "EarlyExitPreventionMiddleware",
     "FilesystemMiddleware",
     "LoopDetectionMiddleware",
     "MemoryMiddleware",
+    "ReasoningFilterMiddleware",
     "ReflectionMiddleware",
+    "SelfCorrectionMiddleware",
     "SkillsMiddleware",
     "SubAgent",
     "SubAgentMiddleware",

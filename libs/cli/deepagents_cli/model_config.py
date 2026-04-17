@@ -1,3 +1,4 @@
+
 """Model configuration management.
 
 Handles loading and saving model configuration from TOML files, providing a
@@ -186,6 +187,7 @@ PROVIDER_API_KEY_ENV: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "azure_openai": "AZURE_OPENAI_API_KEY",
     "baseten": "BASETEN_API_KEY",
+    "cloudflare": "CLOUDFLARE_AI_API_KEY",
     "cohere": "COHERE_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "fireworks": "FIREWORKS_API_KEY",
@@ -196,6 +198,8 @@ PROVIDER_API_KEY_ENV: dict[str, str] = {
     "ibm": "WATSONX_APIKEY",
     "litellm": "LITELLM_API_KEY",
     "mistralai": "MISTRAL_API_KEY",
+    "moonshot": "MOONSHOT_API_KEY",
+    "nebius": "NEBIUS_API_KEY",
     "nvidia": "NVIDIA_API_KEY",
     "openai": "OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",

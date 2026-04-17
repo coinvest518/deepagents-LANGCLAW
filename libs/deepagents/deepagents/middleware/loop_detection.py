@@ -31,7 +31,7 @@ logger = logging.getLogger("deepagents.loop_detection")
 # After this many consecutive identical tool calls (exact args) the loop is broken.
 MAX_REPEATS_EXACT = 3
 # After this many consecutive calls to the *same tool* (any args) the loop is broken.
-MAX_REPEATS_NAME = 5
+MAX_REPEATS_NAME = 10
 
 
 def _tool_call_signature(tc: dict[str, Any]) -> str:
@@ -87,6 +87,29 @@ def _count_consecutive_by_name(messages: list[Any], tool_name: str) -> int:
     return count
 
 
+def _count_total_in_session(messages: list[Any], tool_name: str, max_lookback: int = 30) -> int:
+    """Count total calls to *tool_name* across the entire recent session.
+
+    Unlike _count_consecutive_by_name this does NOT reset when a non-AI
+    message (e.g. user saying "stop") appears in between.  This catches
+    models that briefly switch tools or receive user feedback but then
+    return to the same stuck tool.
+
+    Only looks at the last *max_lookback* AI messages to bound cost.
+    """
+    count = 0
+    ai_seen = 0
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            ai_seen += 1
+            if ai_seen > max_lookback:
+                break
+            for tc in msg.tool_calls:
+                if tc.get("name") == tool_name:
+                    count += 1
+    return count
+
+
 def _build_cancel_messages(
     tool_calls: list[dict[str, Any]], reason: str
 ) -> list[ToolMessage]:
@@ -103,6 +126,12 @@ def _build_cancel_messages(
         )
         for tc in tool_calls
     ]
+
+
+# Hard-stop thresholds — if the LLM ignores soft warnings this many times,
+# we strip its tool calls entirely so the agent loop terminates.
+_HARD_STOP_EXACT = 3   # 3rd identical call → force stop
+_HARD_STOP_NAME = 15   # 15th consecutive call to same tool → force stop
 
 
 class LoopDetectionMiddleware(AgentMiddleware):
@@ -124,6 +153,23 @@ class LoopDetectionMiddleware(AgentMiddleware):
         self.max_repeats_exact = max_repeats_exact if max_repeats_exact is not None else max_repeats
         self.max_repeats_name = max_repeats_name
 
+    def _force_stop(self, messages: list[Any], last: AIMessage, reason: str) -> dict[str, Any]:
+        """Hard-stop: strip tool calls from the AIMessage so the agent loop ends.
+
+        Replaces the last AIMessage with a text-only version and adds cancel
+        ToolMessages so the message history stays consistent.
+        """
+        cancel = _build_cancel_messages(last.tool_calls, reason)
+        # Replace the AIMessage: keep any text content, drop tool_calls
+        forced_text = (
+            last.content
+            or f"I was unable to complete this task — {reason.lower()} "
+            "Here is what I found so far."
+        )
+        forced_ai = last.model_copy(update={"tool_calls": [], "content": forced_text})
+        logger.warning("HARD STOP — stripping tool calls. Reason: %s", reason)
+        return {"messages": Overwrite([*messages[:-1], forced_ai])}
+
     def after_model(self, state: AgentState, runtime: Runtime[Any]) -> dict[str, Any] | None:  # noqa: ARG002
         messages = state["messages"]
         if not messages:
@@ -141,6 +187,14 @@ class LoopDetectionMiddleware(AgentMiddleware):
             # --- Level 1: exact same tool + exact same args ---
             sig = _tool_call_signature(tc)
             exact_count = _count_consecutive_by_signature(history, sig)
+
+            # Hard stop — LLM ignored soft warnings
+            if exact_count >= _HARD_STOP_EXACT - 1:
+                return self._force_stop(
+                    messages, last,
+                    f"Tool '{tool_name}' called {exact_count + 1} times with identical args.",
+                )
+
             if exact_count >= self.max_repeats_exact - 1:
                 logger.warning(
                     "Loop detected (exact): %s called %d consecutive times with identical args.",
@@ -152,9 +206,17 @@ class LoopDetectionMiddleware(AgentMiddleware):
                 )
                 return {"messages": Overwrite([*messages, *cancel])}
 
-            # --- Level 2: same tool name, any args ---
+            # --- Level 2: same tool name, any args (consecutive) ---
             if self.max_repeats_name > 0:
                 name_count = _count_consecutive_by_name(history, tool_name)
+
+                # Hard stop — LLM ignored soft warnings
+                if name_count >= _HARD_STOP_NAME - 1:
+                    return self._force_stop(
+                        messages, last,
+                        f"Tool '{tool_name}' called {name_count + 1} consecutive times.",
+                    )
+
                 if name_count >= self.max_repeats_name - 1:
                     logger.warning(
                         "Loop detected (name): %s called %d consecutive times (args varied). "
@@ -168,7 +230,20 @@ class LoopDetectionMiddleware(AgentMiddleware):
                     )
                     return {"messages": Overwrite([*messages, *cancel])}
 
+            # --- Level 3: session-wide total (non-consecutive) ---
+            # Catches models that get interrupted by a user message (e.g. "stop")
+            # which breaks the consecutive count, but then return to the same tool.
+            session_count = _count_total_in_session(history, tool_name)
+            # Use a higher threshold for session-wide count since it spans
+            # non-consecutive AI messages across the whole session.
+            _SESSION_HARD_STOP = 50
+            if session_count >= _SESSION_HARD_STOP:
+                return self._force_stop(
+                    messages, last,
+                    f"Tool '{tool_name}' called {session_count + 1} times in this session (across non-consecutive turns).",
+                )
+
         return None
 
-    async def aafter_model(self, state: AgentState, runtime: Runtime[Any]) -> dict[str, Any] | None:
+    async def aafter_model(self, state: AgentState, runtime: Runtime[Any]) -> dict[str, Any] | None:  # noqa: ARG002
         return self.after_model(state, runtime)

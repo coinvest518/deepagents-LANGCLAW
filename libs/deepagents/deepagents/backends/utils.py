@@ -422,10 +422,26 @@ def validate_path(path: str, *, allowed_prefixes: Sequence[str] | None = None) -
         msg = f"Path traversal not allowed: {path}"
         raise ValueError(msg)
 
-    # Reject Windows absolute paths (e.g., C:\..., D:/...)
+    # Auto-correct Windows absolute paths (e.g., C:\..., D:/...) to virtual paths.
     if re.match(r"^[a-zA-Z]:", path):
-        msg = f"Windows absolute paths are not supported: {path}. Please use virtual paths starting with / (e.g., /workspace/file.txt)"
-        raise ValueError(msg)
+        posix = path.replace("\\", "/")
+        # Strip drive letter and map known prefixes to virtual roots.
+        stripped = re.sub(r"^[a-zA-Z]:/", "/", posix)
+        skills_idx = stripped.find("/skills/")
+        if skills_idx != -1:
+            path = stripped[skills_idx:]
+        else:
+            # Try to find a workspace boundary and map to /workspace/
+            for marker in ("/workspace/", "/deepagents-LANGCLAW/"):
+                idx = stripped.find(marker)
+                if idx != -1:
+                    path = "/workspace/" + stripped[idx + len(marker):]
+                    break
+            else:
+                # Last resort: strip everything before the last known dir
+                path = "/workspace/" + stripped.lstrip("/")
+        # Re-parse parts after correction
+        parts = PurePosixPath(path).parts
 
     normalized = os.path.normpath(path)
     normalized = normalized.replace("\\", "/")
@@ -696,7 +712,11 @@ def build_grep_results_dict(matches: list[GrepMatch]) -> dict[str, list[tuple[in
     """Group structured matches into the legacy dict form used by formatters."""
     grouped: dict[str, list[tuple[int, str]]] = {}
     for m in matches:
-        grouped.setdefault(m["path"], []).append((m["line"], m["text"]))
+        path = m["path"]
+        # Normalize any Windows absolute paths leaked by the backend.
+        if re.match(r"^[a-zA-Z]:", path):
+            path = validate_path(path)
+        grouped.setdefault(path, []).append((m["line"], m["text"]))
     return grouped
 
 

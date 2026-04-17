@@ -10,7 +10,10 @@ Three separated concerns:
 
 Tools:
 - ``search_memory``     — search long-term memory (Mem0 semantic + AstraDB filter)
-- ``save_memory``       — store a new memory/fact
+- ``save_memory``       — store a new memory/fact with category metadata
+- ``update_memory``     — update/correct an existing memory by ID
+- ``delete_memory``     — delete/forget a memory by ID
+- ``list_memories``     — list all stored memories with metadata
 - ``search_database``   — search structured data records
 - ``save_to_database``  — store structured key-value data
 - ``search_documents``  — search stored documents by type/tags
@@ -99,10 +102,13 @@ def search_memory(query: str, user_id: str = "default", category: str = "") -> d
             for r in hits:
                 if not isinstance(r, dict):
                     continue
+                meta = r.get("metadata", {}) or {}
                 memories.append({
                     "id": r.get("id", ""),
                     "memory": r.get("memory", ""),
                     "score": r.get("score", None),
+                    "category": meta.get("category", ""),
+                    "created_at": r.get("created_at", ""),
                     "source": "mem0",
                 })
         except Exception as exc:
@@ -164,6 +170,8 @@ def save_memory(content: str, user_id: str = "default", category: str = "general
             _mem0_store.client.add(
                 [{"role": "user", "content": content}],
                 user_id=user_id,
+                agent_id="deepagent",
+                metadata={"category": category},
             )
             saved_to.append("mem0")
         except Exception as exc:
@@ -189,6 +197,101 @@ def save_memory(content: str, user_id: str = "default", category: str = "general
     return {"saved": True, "saved_to": saved_to, "content_preview": content[:100]}
 
 
+@tool
+def update_memory(memory_id: str, text: str, category: str = "") -> dict[str, Any]:
+    """Update an existing memory by its ID.
+
+    Use when a fact has changed, the user corrects information, or a memory
+    needs to be refined. First use `search_memory` to find the memory ID,
+    then call this tool to update it.
+
+    Args:
+        memory_id: The unique memory identifier (from search_memory results).
+        text: The new/corrected content for this memory.
+        category: Updated category (optional). Leave empty to keep current.
+
+    Returns:
+        Dict with "updated": True on success, or "error" on failure.
+    """
+    _ensure_stores()
+    if _mem0_store is None:
+        return {"error": "Mem0 not configured. Set MEM0_API_KEY.", "updated": False}
+
+    try:
+        meta = {"category": category} if category else None
+        ok = _mem0_store.update(memory_id, text, metadata=meta)
+        if ok:
+            return {"updated": True, "memory_id": memory_id, "text_preview": text[:100]}
+        return {"error": "Update failed — check the memory ID is correct.", "updated": False}
+    except Exception as exc:
+        logger.warning("update_memory failed", exc_info=True)
+        return {"error": str(exc), "updated": False}
+
+
+@tool
+def delete_memory(memory_id: str) -> dict[str, Any]:
+    """Delete a memory by its ID.
+
+    Use when the user says "forget this", "delete that memory", or wants
+    to remove incorrect information. First use `search_memory` to find the
+    memory ID, then call this tool to delete it.
+
+    Args:
+        memory_id: The unique memory identifier (from search_memory results).
+
+    Returns:
+        Dict with "deleted": True on success, or "error" on failure.
+    """
+    _ensure_stores()
+    if _mem0_store is None:
+        return {"error": "Mem0 not configured. Set MEM0_API_KEY.", "deleted": False}
+
+    try:
+        ok = _mem0_store.delete(memory_id)
+        if ok:
+            return {"deleted": True, "memory_id": memory_id}
+        return {"error": "Delete failed — check the memory ID is correct.", "deleted": False}
+    except Exception as exc:
+        logger.warning("delete_memory failed", exc_info=True)
+        return {"error": str(exc), "deleted": False}
+
+
+@tool
+def list_memories(user_id: str = "default", limit: int = 30) -> dict[str, Any]:
+    """List all stored memories with categories and metadata.
+
+    Use when the user asks "what do you remember", "show all memories",
+    "what have you learned", or wants an overview of stored knowledge.
+
+    Args:
+        user_id: User namespace for isolation (default: "default").
+        limit: Maximum memories to return (default 30).
+
+    Returns:
+        Dict with "memories" list, "count", or "error" on failure.
+    """
+    _ensure_stores()
+    if _mem0_store is None:
+        return {"error": "Mem0 not configured. Set MEM0_API_KEY.", "memories": []}
+
+    try:
+        items = _mem0_store.get_all(user_id=user_id, limit=limit)
+        memories = []
+        for item in items:
+            meta = item.value.get("metadata", {}) or {}
+            memories.append({
+                "id": item.key,
+                "memory": item.value.get("memory", ""),
+                "category": meta.get("category", ""),
+                "created_at": item.value.get("created_at", ""),
+                "updated_at": item.value.get("updated_at", ""),
+            })
+        return {"memories": memories, "count": len(memories)}
+    except Exception as exc:
+        logger.warning("list_memories failed", exc_info=True)
+        return {"error": str(exc), "memories": []}
+
+
 # ---------------------------------------------------------------------------
 # 2. DATABASE tools — structured key-value storage
 # ---------------------------------------------------------------------------
@@ -203,6 +306,14 @@ def search_database(
     Use when the user asks to look up stored data, check records, or
     retrieve structured information saved with save_to_database.
 
+    **Important**: Data saved with `save_to_database` is stored with the
+    provided key as the document `_id`. The data dictionary values are
+    merged directly into the document — no automatic `type` field is added.
+    To filter by type, include a `type` field in the data when saving.
+
+    If a filter returns no results, try searching without a filter to see
+    what keys are available, or search by the exact key you used when saving.
+
     Args:
         query_filter: Optional MongoDB-style filter (e.g. {"type": "config"}).
                       Pass None or {} to list all records.
@@ -210,6 +321,7 @@ def search_database(
 
     Returns:
         Dict with "documents" list and "count", or "error" on failure.
+        When no documents match, a "hint" field suggests available keys.
     """
     _ensure_stores()
     if _astra_store is None:
@@ -221,7 +333,23 @@ def search_database(
             limit=limit,
         )
         docs = [{"key": item.key, "value": item.value} for item in items]
-        return {"documents": docs, "count": len(docs)}
+        result: dict[str, Any] = {"documents": docs, "count": len(docs)}
+
+        # If no results found with a filter, provide a helpful hint
+        if not docs and query_filter:
+            try:
+                all_items = _astra_store.search(query_filter=None, limit=10)
+                if all_items:
+                    available_keys = [item.key for item in all_items[:5]]
+                    result["hint"] = (
+                        f"No documents match filter {query_filter}. "
+                        f"Available keys: {available_keys}. "
+                        "Try searching without a filter or by exact key."
+                    )
+            except Exception:
+                pass  # Best effort hint, don't fail on hint generation
+
+        return result
     except Exception as exc:
         logger.warning("search_database failed", exc_info=True)
         return {"error": str(exc), "documents": []}
@@ -321,6 +449,15 @@ def save_document(
     if _astra_store is None:
         return {"error": "AstraDB not configured. Set ASTRA_DB_API_KEY + ASTRA_DB_ENDPOINT."}
 
+    # Coerce string tags — llama3.1-8b sometimes passes "['a', 'b']" as a string.
+    if isinstance(tags, str):
+        import ast as _ast
+        try:
+            parsed = _ast.literal_eval(tags)
+            tags = parsed if isinstance(parsed, list) else [tags]
+        except Exception:
+            tags = [t.strip().strip("'\"") for t in tags.strip("[]").split(",") if t.strip()]
+
     try:
         doc_id = _astra_store.save_document(
             title=title,
@@ -334,14 +471,77 @@ def save_document(
         return {"error": str(exc), "saved": False}
 
 
+@tool
+def delete_from_database(key: str) -> dict[str, Any]:
+    """Delete a structured data record from the AstraDB database by its key.
+
+    Use when the user says "delete this record", "remove the X entry",
+    or wants to clean up stale data from agent_data. First use
+    `search_database` to confirm the key exists, then call this tool.
+
+    Args:
+        key: The exact key (_id) of the record to delete.
+
+    Returns:
+        Dict with "deleted": True on success, or "error" on failure.
+    """
+    _ensure_stores()
+    if _astra_store is None:
+        return {"error": "AstraDB not configured. Set ASTRA_DB_API_KEY + ASTRA_DB_ENDPOINT.", "deleted": False}
+
+    try:
+        from deepagents.store_adapters.astra_store import COLLECTION_DATA
+        ok = _astra_store.delete(key, collection=COLLECTION_DATA)
+        if ok:
+            return {"deleted": True, "key": key}
+        return {"error": f"No record found with key {key!r}.", "deleted": False}
+    except Exception as exc:
+        logger.warning("delete_from_database failed", exc_info=True)
+        return {"error": str(exc), "deleted": False}
+
+
+@tool
+def delete_document(document_id: str) -> dict[str, Any]:
+    """Delete a stored document from AstraDB by its ID.
+
+    Use when the user says "delete this document", "remove the saved note X",
+    or wants to clean up agent_documents. First use `search_documents`
+    to find the document ID, then call this tool.
+
+    Args:
+        document_id: The unique document ID (from search_documents results).
+
+    Returns:
+        Dict with "deleted": True on success, or "error" on failure.
+    """
+    _ensure_stores()
+    if _astra_store is None:
+        return {"error": "AstraDB not configured. Set ASTRA_DB_API_KEY + ASTRA_DB_ENDPOINT.", "deleted": False}
+
+    try:
+        from deepagents.store_adapters.astra_store import COLLECTION_DOCUMENTS
+        ok = _astra_store.delete(document_id, collection=COLLECTION_DOCUMENTS)
+        if ok:
+            return {"deleted": True, "document_id": document_id}
+        return {"error": f"No document found with id {document_id!r}.", "deleted": False}
+    except Exception as exc:
+        logger.warning("delete_document failed", exc_info=True)
+        return {"error": str(exc), "deleted": False}
+
+
 # ---------------------------------------------------------------------------
 # Convenience list for importing into the agent tool list
 # ---------------------------------------------------------------------------
 MEMORY_TOOLS = [
     search_memory,
     save_memory,
+    update_memory,
+    delete_memory,
+    list_memories,
     search_database,
     save_to_database,
+    delete_from_database,
     search_documents,
     save_document,
+    delete_document,
 ]

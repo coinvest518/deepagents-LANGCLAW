@@ -51,7 +51,8 @@ Common sections include:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Annotated, NotRequired, TypedDict
+import os
+from typing import TYPE_CHECKING, Annotated, Any, NotRequired, TypedDict
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -99,59 +100,14 @@ MEMORY_SYSTEM_PROMPT = """<agent_memory>
 </agent_memory>
 
 <memory_guidelines>
-    The above <agent_memory> was loaded in from files in your filesystem. As you learn from your interactions with the user, you can save new knowledge by calling the `edit_file` tool.
+Memory is loaded from files in your filesystem. Use `edit_file` to save new knowledge.
 
-    **Learning from feedback:**
-    - One of your MAIN PRIORITIES is to learn from your interactions with the user. These learnings can be implicit or explicit. This means that in the future, you will remember this important information.
-    - When you need to remember something, updating memory must be your FIRST, IMMEDIATE action - before responding to the user, before calling other tools, before doing anything else. Just update memory immediately.
-    - When user says something is better/worse, capture WHY and encode it as a pattern.
-    - Each correction is a chance to improve permanently - don't just fix the immediate issue, update your instructions.
-    - A great opportunity to update your memories is when the user interrupts a tool call and provides feedback. You should update your memories immediately before revising the tool call.
-    - Look for the underlying principle behind corrections, not just the specific mistake.
-    - The user might not explicitly ask you to remember something, but if they provide information that is useful for future use, you should update your memories immediately.
-
-    **Asking for information:**
-    - If you lack context to perform an action (e.g. send a Slack DM, requires a user ID/email) you should explicitly ask the user for this information.
-    - It is preferred for you to ask for information, don't assume anything that you do not know!
-    - When the user provides information that is useful for future use, you should update your memories immediately.
-
-    **When to update memories:**
-    - When the user explicitly asks you to remember something (e.g., "remember my email", "save this preference")
-    - When the user describes your role or how you should behave (e.g., "you are a web researcher", "always do X")
-    - When the user gives feedback on your work - capture what was wrong and how to improve
-    - When the user provides information required for tool use (e.g., slack channel ID, email addresses)
-    - When the user provides context useful for future tasks, such as how to use tools, or which actions to take in a particular situation
-    - When you discover new patterns or preferences (coding styles, conventions, workflows)
-
-    **When to NOT update memories:**
-    - When the information is temporary or transient (e.g., "I'm running late", "I'm on my phone right now")
-    - When the information is a one-time task request (e.g., "Find me a recipe", "What's 25 * 4?")
-    - When the information is a simple question that doesn't reveal lasting preferences (e.g., "What day is it?", "Can you explain X?")
-    - When the information is an acknowledgment or small talk (e.g., "Sounds good!", "Hello", "Thanks for that")
-    - When the information is stale or irrelevant in future conversations
-    - Never store API keys, access tokens, passwords, or any other credentials in any file, memory, or system prompt.
-    - If the user asks where to put API keys or provides an API key, do NOT echo or save it.
-
-    **Examples:**
-    Example 1 (remembering user information):
-    User: Can you connect to my google account?
-    Agent: Sure, I'll connect to your google account, what's your google account email?
-    User: john@example.com
-    Agent: Let me save this to my memory.
-    Tool Call: edit_file(...) -> remembers that the user's google account email is john@example.com
-
-    Example 2 (remembering implicit user preferences):
-    User: Can you write me an example for creating a deep agent in LangChain?
-    Agent: Sure, I'll write you an example for creating a deep agent in LangChain <example code in Python>
-    User: Can you do this in JavaScript
-    Agent: Let me save this to my memory.
-    Tool Call: edit_file(...) -> remembers that the user prefers to get LangChain code examples in JavaScript
-    Agent: Sure, here is the JavaScript example<example code in JavaScript>
-
-    Example 3 (do not remember transient information):
-    User: I'm going to play basketball tonight so I will be offline for a few hours.
-    Agent: Okay I'll add a block to your calendar.
-    Tool Call: create_calendar_event(...) -> just calls a tool, does not commit anything to memory, as it is transient information
+- Learn from ALL interactions: explicit requests ("remember X") AND implicit signals (corrections, preferences, repeated patterns).
+- When you need to remember something, update memory IMMEDIATELY — before responding or calling other tools.
+- Capture WHY something is better/worse, not just the specific correction.
+- Ask for missing context (IDs, emails) rather than guessing. Save provided info for future use.
+- DO save: user preferences, role descriptions, feedback, tool-use context, recurring patterns.
+- Do NOT save: transient info, one-time requests, small talk, API keys, passwords, or credentials.
 </memory_guidelines>
 """
 
@@ -190,6 +146,8 @@ class MemoryMiddleware(AgentMiddleware[MemoryState, ContextT, ResponseT]):
         """
         self._backend = backend
         self.sources = sources
+        self._mem0_store: Any = None
+        self._mem0_checked = False
 
     def _get_backend(self, state: MemoryState, runtime: Runtime, config: RunnableConfig) -> BackendProtocol:
         """Resolve backend from instance or factory.
@@ -352,3 +310,151 @@ class MemoryMiddleware(AgentMiddleware[MemoryState, ContextT, ResponseT]):
         """
         modified_request = self.modify_request(request)
         return await handler(modified_request)
+
+    # ------------------------------------------------------------------
+    # Auto-learning hooks — feed each completed turn to Mem0 so facts
+    # and preferences are extracted automatically without the agent
+    # having to decide to call save_memory explicitly.
+    # ------------------------------------------------------------------
+
+    def _get_mem0_store(self) -> Any:
+        """Return a cached Mem0Store, or None if MEM0_API_KEY is absent.
+
+        Returns:
+            Mem0Store instance or None.
+        """
+        if not self._mem0_checked:
+            self._mem0_checked = True
+            if os.environ.get("MEM0_API_KEY"):
+                try:
+                    from deepagents.store_adapters.mem0_store import Mem0Store
+                    self._mem0_store = Mem0Store.from_env()
+                    logger.info("MemoryMiddleware: Mem0Store ready for auto-learning")
+                except Exception:
+                    logger.warning("MemoryMiddleware: Mem0Store init failed", exc_info=True)
+        return self._mem0_store
+
+    @staticmethod
+    def _get_real_text(msg: Any) -> str:
+        """Extract real text from a message, filtering out reasoning content.
+
+        NVIDIA Nemotron (and similar models) can put chain-of-thought reasoning
+        into ``content`` and duplicate it in ``additional_kwargs.reasoning_content``.
+        We skip that so Mem0 only learns from actual user-facing text.
+        """
+        content = getattr(msg, "content", "") or ""
+        text = content if isinstance(content, str) else " ".join(
+            b.get("text", "") if isinstance(b, dict) else str(b)
+            for b in content
+            if not isinstance(b, dict) or b.get("type", "text") == "text"
+        )
+        if not text.strip():
+            return ""
+
+        # Filter out reasoning-as-content
+        additional = getattr(msg, "additional_kwargs", None) or {}
+        reasoning = additional.get("reasoning_content") or additional.get("reasoning") or ""
+        if reasoning and text.strip() == reasoning.strip():
+            return ""
+
+        return text.strip()
+
+    def _extract_last_turn(self, state: MemoryState) -> tuple[str, str] | None:
+        """Pull the last user + assistant message pair from state.
+
+        Filters out:
+        - Reasoning-as-content (from ``additional_kwargs.reasoning_content``)
+        - System nudge messages injected by ReasoningFilterMiddleware
+        - Tool messages
+
+        Args:
+            state: Current agent state containing messages.
+
+        Returns:
+            ``(user_text, assistant_text)`` or ``None`` if either is missing.
+        """
+        messages = state.get("messages", [])
+        user_text = assistant_text = ""
+        for msg in reversed(messages):
+            role = getattr(msg, "type", None) or getattr(msg, "role", None)
+            text = self._get_real_text(msg)
+            if not text:
+                continue
+            if role in ("ai", "assistant") and not assistant_text:
+                # Skip AI messages that are just tool calls with no real text
+                if getattr(msg, "tool_calls", None):
+                    continue
+                assistant_text = text
+            elif role in ("human", "user") and not user_text:
+                # Skip system nudge messages from ReasoningFilterMiddleware
+                if text.startswith("[SYSTEM]"):
+                    continue
+                user_text = text
+            if user_text and assistant_text:
+                break
+        if user_text and assistant_text:
+            logger.debug(
+                "Auto-learn turn extracted: user=%d chars, assistant=%d chars",
+                len(user_text), len(assistant_text),
+            )
+            return user_text, assistant_text
+        logger.debug("Auto-learn: no valid turn found (user=%r, assistant=%r)",
+                     bool(user_text), bool(assistant_text))
+        return None
+
+    def after_agent(self, state: MemoryState, runtime: Runtime) -> None:  # ty: ignore[invalid-method-override]
+        """Auto-learn from the completed turn by feeding it to Mem0.
+
+        Extracts the last user/assistant message pair and calls
+        `learn_from_conversation` so Mem0 can extract preferences, facts,
+        and context without the agent having to explicitly call `save_memory`.
+
+        This is a best-effort operation — failures are logged and swallowed
+        so they never interrupt the agent response.
+
+        Args:
+            state: Current agent state after the turn completes.
+            runtime: Runtime context (unused but required by interface).
+        """
+        turn = self._extract_last_turn(state)
+        if turn is None:
+            logger.info("MemoryMiddleware.after_agent: no turn to learn from")
+            return
+        store = self._get_mem0_store()
+        if store is None:
+            logger.info("MemoryMiddleware.after_agent: no Mem0 store (MEM0_API_KEY missing?)")
+            return
+        user_msg, assistant_msg = turn
+        try:
+            store.learn_from_conversation(user_msg, assistant_msg)
+            logger.info(
+                "MemoryMiddleware: auto-learned from turn (user=%d chars, assistant=%d chars)",
+                len(user_msg), len(assistant_msg),
+            )
+        except Exception:
+            logger.warning("MemoryMiddleware.after_agent: auto-learn FAILED", exc_info=True)
+
+    async def aafter_agent(self, state: MemoryState, runtime: Runtime) -> None:  # ty: ignore[invalid-method-override]
+        """Async auto-learn from the completed turn by feeding it to Mem0.
+
+        Args:
+            state: Current agent state after the turn completes.
+            runtime: Runtime context (unused but required by interface).
+        """
+        turn = self._extract_last_turn(state)
+        if turn is None:
+            logger.info("MemoryMiddleware.aafter_agent: no turn to learn from")
+            return
+        store = self._get_mem0_store()
+        if store is None:
+            logger.info("MemoryMiddleware.aafter_agent: no Mem0 store (MEM0_API_KEY missing?)")
+            return
+        user_msg, assistant_msg = turn
+        try:
+            await store.alearn_from_conversation(user_msg, assistant_msg)
+            logger.info(
+                "MemoryMiddleware: async auto-learned from turn (user=%d chars, assistant=%d chars)",
+                len(user_msg), len(assistant_msg),
+            )
+        except Exception:
+            logger.warning("MemoryMiddleware.aafter_agent: auto-learn FAILED", exc_info=True)

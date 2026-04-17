@@ -37,8 +37,7 @@ class TestValidatePath:
             ("../etc/passwd", "Path traversal not allowed"),
             ("foo/../../etc", "Path traversal not allowed"),
             ("~/secret.txt", "Path traversal not allowed"),
-            ("C:\\Users\\file.txt", "Windows absolute paths are not supported"),
-            ("D:/data/file.txt", "Windows absolute paths are not supported"),
+            # Windows paths are auto-corrected, not rejected — see test_windows_path_auto_correction
         ],
     )
     def test_invalid_paths_rejected(self, invalid_path: str, error_match: str) -> None:
@@ -59,6 +58,31 @@ class TestValidatePath:
         for path in paths:
             result = validate_path(path)
             assert "\\" not in result, f"Backslash in output for input '{path}': {result}"
+
+    @pytest.mark.parametrize(
+        ("input_path", "expected"),
+        [
+            (
+                "C:\\Users\\mildh\\deepagents-LANGCLAW\\check_balance.py",
+                "/workspace/check_balance.py",
+            ),
+            (
+                "C:/Users/mildh/deepagents-LANGCLAW/scripts/run.py",
+                "/workspace/scripts/run.py",
+            ),
+            (
+                "C:\\Users\\mildh\\deepagents-LANGCLAW\\skills\\built-in\\alchemy\\SKILL.md",
+                "/skills/built-in/alchemy/SKILL.md",
+            ),
+            (
+                "D:/data/skills/user/my-skill/SKILL.md",
+                "/skills/user/my-skill/SKILL.md",
+            ),
+        ],
+    )
+    def test_windows_path_auto_correction(self, input_path: str, expected: str) -> None:
+        """Test that Windows absolute paths are auto-corrected to virtual paths."""
+        assert validate_path(input_path) == expected
 
     def test_root_path(self) -> None:
         """Test that root path normalizes correctly."""

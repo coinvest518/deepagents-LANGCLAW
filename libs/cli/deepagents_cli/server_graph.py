@@ -143,17 +143,33 @@ def make_graph() -> Any:  # noqa: ANN401
     if project_context is not None:
         settings.reload_from_environment(start_path=project_context.user_cwd)
 
+    # Ensure a generous max_tokens so the model is never truncated mid-reasoning.
+    # The NVIDIA NIM API can default to 1024 if not explicitly set, which causes
+    # finish_reason=length and empty tool_calls — hanging the graph at END.
+    _model_params: dict[str, object] = dict(config.model_params or {})
+    _model_params.setdefault("max_tokens", 8192)
+
     try:
-        result = create_model(config.model, extra_kwargs=config.model_params)
+        result = create_model(config.model, extra_kwargs=_model_params)
     except Exception as model_err:
         logger.warning(
             "Primary model '%s' failed (%s), trying fallback providers",
             config.model, model_err,
         )
         # Try fallback providers we have keys for — best tool-callers first
-        for fallback in ("nvidia:meta/llama-3.3-70b-instruct", "mistralai:mistral-large-latest", "cerebras:llama-3.3-70b", "openrouter:mistralai/mistral-small-3.1-24b-instruct:free"):
+        for fallback in (
+            "openrouter:deepseek/deepseek-chat-v3-0324:free",
+            "openrouter:meta-llama/llama-4-maverick:free",
+            "openrouter:qwen/qwen3.5-72b-instruct:free",
+            "moonshot:kimi-k2.5",
+            "cloudflare:@cf/meta/llama-4-scout-instruct",
+            "cerebras:llama-4-scout-17b-16e-instruct",
+            "nvidia:qwen/qwen3.5-397b-a17b",
+            "nvidia:deepseek-ai/deepseek-v3.2",
+            "mistralai:mistral-large-latest",
+        ):
             try:
-                result = create_model(fallback, extra_kwargs=config.model_params)
+                result = create_model(fallback, extra_kwargs=_model_params)
                 logger.info("Fallback model '%s' loaded successfully", fallback)
                 break
             except Exception:

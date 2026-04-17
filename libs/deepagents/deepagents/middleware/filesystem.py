@@ -527,7 +527,7 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
                     stacklevel=1,
                 )
                 infos = ls_result
-            paths = [fi.get("path", "") for fi in infos]
+            paths = [validate_path(fi.get("path", "")) for fi in infos]
             result = truncate_if_too_long(paths)
             return str(result)
 
@@ -555,7 +555,7 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
                     stacklevel=1,
                 )
                 infos = ls_result
-            paths = [fi.get("path", "") for fi in infos]
+            paths = [validate_path(fi.get("path", "")) for fi in infos]
             result = truncate_if_too_long(paths)
             return str(result)
 
@@ -844,7 +844,7 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
                     stacklevel=1,
                 )
                 infos = glob_result
-            paths = [fi.get("path", "") for fi in infos]
+            paths = [validate_path(fi.get("path", "")) for fi in infos]
             result = truncate_if_too_long(paths)
             return str(result)
 
@@ -879,7 +879,7 @@ class FilesystemMiddleware(AgentMiddleware[FilesystemState, ContextT, ResponseT]
                     stacklevel=1,
                 )
                 infos = glob_result
-            paths = [fi.get("path", "") for fi in infos]
+            paths = [validate_path(fi.get("path", "")) for fi in infos]
             result = truncate_if_too_long(paths)
             return str(result)
 

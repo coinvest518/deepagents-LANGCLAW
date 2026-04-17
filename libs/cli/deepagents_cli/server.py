@@ -277,7 +277,7 @@ def _build_server_env() -> dict[str, str]:
         *site.getsitepackages(),           # system site-packages (has nvidia, ollama, etc.)
     ]
     _existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = ":".join(filter(None, _paths + [_existing]))
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, _paths + [_existing]))
     # LangGraph SDK requires one of these keys to be set — even for a local
     # dev server — or it throws a TypeError before making any network request.
     # Use whatever the caller has; fall back to "local" so the SDK is satisfied.

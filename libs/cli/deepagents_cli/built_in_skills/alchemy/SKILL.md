@@ -42,91 +42,102 @@ arb-mainnet      (Arbitrum)
 opt-mainnet      (Optimism)
 ```
 
-## How to Use — Run the Script
+## How to Use — http_request tool ONLY
 
-The bundled script `scripts/alchemy_tools.py` handles everything.
-Always use `python scripts/alchemy_tools.py <cmd> <args>` from this skill's directory.
+**IMPORTANT: No script execution. Use `http_request` for ALL Alchemy calls.**
 
-### Check wallet balance
-```bash
-python scripts/alchemy_tools.py balance 0xYourAddress eth-mainnet
-python scripts/alchemy_tools.py balance 0xYourAddress base-mainnet
+**KEY INJECTION IS AUTOMATIC** — use the bare `/v2/` URL with NO key. The server injects the real key before the request goes out. Never put a key or placeholder in the URL yourself.
+
+Base URL pattern: `https://{network}.g.alchemy.com/v2/`  ← use exactly this, no key appended
+
+### Check native balance (ETH/MATIC)
+
+```
+http_request(
+  method="POST",
+  url="https://base-mainnet.g.alchemy.com/v2/",
+  body={"jsonrpc":"2.0","method":"eth_getBalance","params":["0xAddress","latest"],"id":1}
+)
+```
+Convert result hex → decimal ÷ 1e18 to get ETH amount.
+
+### Get all ERC-20 token balances
+
+```
+http_request(
+  method="POST",
+  url="https://base-mainnet.g.alchemy.com/v2/",
+  body={"jsonrpc":"2.0","method":"alchemy_getTokenBalances","params":["0xAddress","erc20"],"id":1}
+)
+```
+For each token with non-zero balance, call `alchemy_getTokenMetadata` to get symbol/decimals.
+
+### Get token metadata (symbol, decimals)
+
+```
+http_request(
+  method="POST",
+  url="https://eth-mainnet.g.alchemy.com/v2/",
+  body={"jsonrpc":"2.0","method":"alchemy_getTokenMetadata","params":["0xTokenContractAddress"],"id":1}
+)
 ```
 
-### Get all token balances (with names + amounts)
-```bash
-python scripts/alchemy_tools.py tokens 0xYourAddress eth-mainnet
-```
+### Get real-time prices (ETH, BTC, USDC, etc.)
 
-### Get real-time prices
-```bash
-python scripts/alchemy_tools.py price ETH,BTC,USDC
-python scripts/alchemy_tools.py price ETH,MATIC,LINK,UNI
 ```
+http_request(
+  method="GET",
+  url="https://api.g.alchemy.com/prices/v1/tokens/by-symbol?symbols=ETH,BTC,USDC"
+)
+```
+Note: The prices API uses a different base (`api.g.alchemy.com/prices/v1/`) — key is also auto-injected.
 
 ### Get transfer history
-```bash
-python scripts/alchemy_tools.py transfers 0xYourAddress eth-mainnet
+
+```
+http_request(
+  method="POST",
+  url="https://eth-mainnet.g.alchemy.com/v2/",
+  body={"jsonrpc":"2.0","method":"alchemy_getAssetTransfers","params":[{"fromAddress":"0xAddress","category":["external","erc20","erc721"],"withMetadata":true,"maxCount":"0x14"}],"id":1}
+)
 ```
 
-### Get NFTs
-```bash
-python scripts/alchemy_tools.py nfts 0xYourAddress eth-mainnet
+### Get current gas price
+
 ```
-
-### Get gas prices
-```bash
-python scripts/alchemy_tools.py gas eth-mainnet
-python scripts/alchemy_tools.py gas base-mainnet
+http_request(
+  method="POST",
+  url="https://eth-mainnet.g.alchemy.com/v2/",
+  body={"jsonrpc":"2.0","method":"eth_gasPrice","params":[],"id":1}
+)
 ```
+Convert hex result ÷ 1e9 for Gwei.
 
-### Look up a transaction
-```bash
-python scripts/alchemy_tools.py tx 0xTransactionHash eth-mainnet
+### Get NFTs owned by address
+
 ```
-
-### Simulate a transaction (preview before sending)
-```bash
-python scripts/alchemy_tools.py simulate 0xFromAddress 0xToAddress 0.01 eth-mainnet
-```
-
-## Direct Python (for inline use)
-
-```python
-import os, sys
-sys.path.insert(0, "path/to/alchemy/scripts")
-import alchemy_tools as alchemy
-
-# Prices
-prices = alchemy.get_prices(["ETH", "BTC"])
-# → [{"symbol": "ETH", "price_usd": 2087.94}, ...]
-
-# Balance
-bal = alchemy.get_balance("0xYourAddress", "eth-mainnet")
-# → {"balance": 1.234, "symbol": "ETH"}
-
-# Token balances
-tokens = alchemy.get_token_balances_with_metadata("0xYourAddress", "base-mainnet")
-# → [{"symbol": "USDC", "balance": 500.0}, ...]
+http_request(
+  method="GET",
+  url="https://eth-mainnet.g.alchemy.com/nft/v3/getNFTsForOwner?owner=0xAddress&withMetadata=true&pageSize=10"
+)
 ```
 
 ## Agent's Own Wallet
 
-The agent has a dedicated wallet for transacting on Base and Ethereum:
-
 ```
 Address: 0xAfF992D7921cB5c0b55613d14C2dA6B35f9e3439
 Private key: AGENT_WALLET_PRIVATE_KEY (env var — never print this)
-Networks: Base mainnet, Base Sepolia testnet, Ethereum mainnet
+Networks: Base mainnet, Ethereum mainnet
 ```
 
-To check the agent's own balance:
-```bash
-python scripts/alchemy_tools.py balance 0xAfF992D7921cB5c0b55613d14C2dA6B35f9e3439 base-mainnet
-python scripts/alchemy_tools.py balance 0xAfF992D7921cB5c0b55613d14C2dA6B35f9e3439 base-sepolia
+To check the agent's own balance on Base:
 ```
-
-To get test ETH for the agent: https://www.alchemy.com/faucets/base-sepolia
+http_request(
+  method="POST",
+  url="https://base-mainnet.g.alchemy.com/v2/",
+  body={"jsonrpc":"2.0","method":"eth_getBalance","params":["0xAfF992D7921cB5c0b55613d14C2dA6B35f9e3439","latest"],"id":1}
+)
+```
 
 ## What the Agent CANNOT Do via Alchemy (yet)
 
@@ -134,9 +145,12 @@ To get test ETH for the agent: https://www.alchemy.com/faucets/base-sepolia
 - **Swap tokens** — Use DEX aggregators (1inch, Uniswap). Alchemy can *simulate* the tx outcome first.
 - **Get private key / seed phrase** — Never print AGENT_WALLET_PRIVATE_KEY.
 
-## Tips
+## Wallet Check Protocol
 
-- If user asks "check my wallet balance" → ask for their address first, then run `balance` + `tokens`
-- For prices use symbols (ETH, not ethereum): `price ETH,BTC,USDC`
-- For multi-chain check: run `balance` on each network the user cares about
-- Simulate before any real transaction to show the user what will change
+When user asks "check wallet balance" or "check my wallet":
+1. **Do NOT ask for an address** — use the agent wallet from Runtime Configuration
+2. Check ETH balance on ALL 5 networks in parallel (eth-mainnet, base-mainnet, polygon-mainnet, arb-mainnet, opt-mainnet)
+3. Check ERC-20 token balances on each network
+4. Check NFTs
+5. Get current prices for any tokens found
+6. Report everything — do NOT stop after one network and ask "would you like me to check more?"

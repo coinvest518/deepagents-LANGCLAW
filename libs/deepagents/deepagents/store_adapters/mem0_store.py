@@ -102,6 +102,7 @@ class Mem0Store:
                         "memory": r.get("memory", ""),
                         "id": r.get("id", ""),
                         "score": r.get("score"),
+                        "metadata": r.get("metadata", {}),
                         "created_at": r.get("created_at", ""),
                     },
                 ))
@@ -124,12 +125,104 @@ class Mem0Store:
                     continue
                 items.append(StoreItem(
                     key=r.get("id", ""),
-                    value={"memory": r.get("memory", ""), "id": r.get("id", "")},
+                    value={
+                        "memory": r.get("memory", ""),
+                        "id": r.get("id", ""),
+                        "metadata": r.get("metadata", {}),
+                        "created_at": r.get("created_at", ""),
+                        "updated_at": r.get("updated_at", ""),
+                    },
                 ))
             return items
         except Exception as exc:  # noqa: BLE001
             logger.warning("Mem0Store.get_all failed: %s", exc, exc_info=True)
             return []
+
+    def update(self, memory_id: str, text: str, metadata: dict | None = None) -> bool:
+        """Update an existing memory by its ID.
+
+        Args:
+            memory_id: The unique memory identifier.
+            text: New text content for the memory.
+            metadata: Optional metadata to update (e.g. category, tags).
+
+        Returns:
+            True if the update succeeded, False otherwise.
+        """
+        try:
+            kwargs: dict[str, Any] = {"memory_id": memory_id, "text": text}
+            if metadata:
+                kwargs["metadata"] = metadata
+            self.client.update(**kwargs)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Mem0Store.update failed: %s", exc, exc_info=True)
+            return False
+
+    def delete(self, memory_id: str) -> bool:
+        """Delete a memory by its ID.
+
+        Args:
+            memory_id: The unique memory identifier.
+
+        Returns:
+            True if deletion succeeded, False otherwise.
+        """
+        try:
+            self.client.delete(memory_id=memory_id)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Mem0Store.delete failed: %s", exc, exc_info=True)
+            return False
+
+    def history(self, memory_id: str) -> list[dict]:
+        """Get the evolution history of a specific memory.
+
+        Args:
+            memory_id: The unique memory identifier.
+
+        Returns:
+            List of history entries showing how the memory changed over time.
+        """
+        try:
+            raw = self.client.history(memory_id=memory_id)
+            return raw if isinstance(raw, list) else raw.get("results", [])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Mem0Store.history failed: %s", exc, exc_info=True)
+            return []
+
+    def learn_from_conversation(
+        self, user_msg: str, assistant_msg: str,
+        *, user_id: str = "default", agent_id: str = "deepagent",
+    ) -> dict | None:
+        """Feed a conversation exchange for automatic fact extraction.
+
+        Mem0 auto-extracts preferences, facts, and context from the
+        conversation without explicit save commands.
+
+        Args:
+            user_msg: The user's message.
+            assistant_msg: The assistant's reply.
+            user_id: User namespace.
+            agent_id: Agent identifier for memory separation.
+
+        Returns:
+            Mem0 API response dict, or None on failure.
+        """
+        try:
+            result = self.client.add(
+                [
+                    {"role": "user", "content": user_msg},
+                    {"role": "assistant", "content": assistant_msg},
+                ],
+                user_id=user_id,
+                agent_id=agent_id,
+                metadata={"category": "auto_learned", "source": "conversation"},
+            )
+            return result
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Mem0Store.learn_from_conversation failed: %s", exc, exc_info=True)
+            return None
 
     # Async wrappers
     async def aget(self, user_id: str, key: str) -> StoreItem | None:
@@ -140,3 +233,21 @@ class Mem0Store:
 
     async def asearch(self, query: str, user_id: str = "default", limit: int = 10) -> list[StoreItem]:
         return await asyncio.to_thread(self.search, query, user_id, limit)
+
+    async def aupdate(self, memory_id: str, text: str, metadata: dict | None = None) -> bool:
+        return await asyncio.to_thread(self.update, memory_id, text, metadata)
+
+    async def adelete(self, memory_id: str) -> bool:
+        return await asyncio.to_thread(self.delete, memory_id)
+
+    async def ahistory(self, memory_id: str) -> list[dict]:
+        return await asyncio.to_thread(self.history, memory_id)
+
+    async def alearn_from_conversation(
+        self, user_msg: str, assistant_msg: str,
+        *, user_id: str = "default", agent_id: str = "deepagent",
+    ) -> dict | None:
+        return await asyncio.to_thread(
+            self.learn_from_conversation, user_msg, assistant_msg,
+            user_id=user_id, agent_id=agent_id,
+        )

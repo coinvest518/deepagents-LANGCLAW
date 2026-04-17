@@ -26,8 +26,8 @@ Never use web_search or Python scripts for these — call composio_action direct
 
 **Google Docs:** `GOOGLEDOCS_CREATE_DOCUMENT`, `GOOGLEDOCS_GET_DOCUMENT_BY_ID`, `GOOGLEDOCS_SEARCH_DOCUMENTS`, `GOOGLEDOCS_UPDATE_EXISTING_DOCUMENT`
 
-**Google Sheets** (use Drive OAuth — sheets-native account has broken token):
-`GOOGLESHEETS_BATCH_GET`, `GOOGLESHEETS_BATCH_UPDATE`
+**Google Sheets** (uses Drive OAuth automatically — sheets-native account has broken token):
+`GOOGLESHEETS_CREATE_GOOGLE_SHEET1`, `GOOGLESHEETS_BATCH_GET`, `GOOGLESHEETS_BATCH_UPDATE`, `GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND`, `GOOGLESHEETS_CREATE_SPREADSHEET_ROW`, `GOOGLESHEETS_LOOKUP_SPREADSHEET_ROW`, `GOOGLESHEETS_UPSERT_ROWS` — see googlesheets skill for full list
 
 **Google Analytics:** `GOOGLE_ANALYTICS_RUN_REPORT`, `GOOGLE_ANALYTICS_LIST_ACCOUNTS`
 

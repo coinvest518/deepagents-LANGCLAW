@@ -904,3 +904,106 @@ def test_before_agent_batch_skips_missing_keeps_found(tmp_path: Path) -> None:
     assert existing_path in result["memory_contents"]
     assert missing_path not in result["memory_contents"]
     assert backend.download_files_call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Auto-learning hook tests
+# ---------------------------------------------------------------------------
+
+def test_extract_last_turn_returns_user_and_assistant() -> None:
+    """_extract_last_turn picks the most recent user+assistant pair."""
+    middleware = MemoryMiddleware(backend=None, sources=[])  # type: ignore[arg-type]
+    state = {
+        "messages": [
+            HumanMessage(content="Hello"),
+            AIMessage(content="Hi there"),
+            HumanMessage(content="What's the weather?"),
+            AIMessage(content="It's sunny today."),
+        ]
+    }
+    result = middleware._extract_last_turn(state)  # type: ignore[arg-type]
+    assert result is not None
+    user_msg, assistant_msg = result
+    assert user_msg == "What's the weather?"
+    assert assistant_msg == "It's sunny today."
+
+
+def test_extract_last_turn_returns_none_when_messages_missing() -> None:
+    """_extract_last_turn returns None when state has no messages."""
+    middleware = MemoryMiddleware(backend=None, sources=[])  # type: ignore[arg-type]
+    assert middleware._extract_last_turn({}) is None  # type: ignore[arg-type]
+    assert middleware._extract_last_turn({"messages": []}) is None  # type: ignore[arg-type]
+
+
+def test_extract_last_turn_returns_none_when_only_human_message() -> None:
+    """_extract_last_turn returns None when there is no assistant reply yet."""
+    middleware = MemoryMiddleware(backend=None, sources=[])  # type: ignore[arg-type]
+    state = {"messages": [HumanMessage(content="Hello?")]}
+    assert middleware._extract_last_turn(state) is None  # type: ignore[arg-type]
+
+
+def test_after_agent_no_mem0_key_is_noop(monkeypatch: object) -> None:
+    """after_agent does nothing and raises nothing when MEM0_API_KEY is absent."""
+    import os
+    monkeypatch.delenv("MEM0_API_KEY", raising=False)  # type: ignore[attr-defined]
+    middleware = MemoryMiddleware(backend=None, sources=[])  # type: ignore[arg-type]
+    state = {
+        "messages": [
+            HumanMessage(content="Hi"),
+            AIMessage(content="Hello back"),
+        ]
+    }
+    # Should never raise
+    middleware.after_agent(state, None)  # type: ignore[arg-type]
+    assert middleware._mem0_store is None
+
+
+def test_after_agent_calls_learn_from_conversation(monkeypatch: object) -> None:
+    """after_agent feeds the last turn to the Mem0Store."""
+    import os
+    calls: list[tuple[str, str]] = []
+
+    class _FakeStore:
+        def learn_from_conversation(self, user_msg: str, assistant_msg: str, **_: object) -> None:
+            calls.append((user_msg, assistant_msg))
+
+    monkeypatch.setenv("MEM0_API_KEY", "fake-key")  # type: ignore[attr-defined]
+    middleware = MemoryMiddleware(backend=None, sources=[])  # type: ignore[arg-type]
+    middleware._mem0_store = _FakeStore()
+    middleware._mem0_checked = True  # skip real init
+
+    state = {
+        "messages": [
+            HumanMessage(content="Save my preference"),
+            AIMessage(content="Got it, saved."),
+        ]
+    }
+    middleware.after_agent(state, None)  # type: ignore[arg-type]
+
+    assert len(calls) == 1
+    assert calls[0] == ("Save my preference", "Got it, saved.")
+
+
+async def test_aafter_agent_calls_learn_from_conversation(monkeypatch: object) -> None:
+    """aafter_agent feeds the last turn to the Mem0Store asynchronously."""
+    calls: list[tuple[str, str]] = []
+
+    class _FakeStore:
+        async def alearn_from_conversation(self, user_msg: str, assistant_msg: str, **_: object) -> None:
+            calls.append((user_msg, assistant_msg))
+
+    monkeypatch.setenv("MEM0_API_KEY", "fake-key")  # type: ignore[attr-defined]
+    middleware = MemoryMiddleware(backend=None, sources=[])  # type: ignore[arg-type]
+    middleware._mem0_store = _FakeStore()
+    middleware._mem0_checked = True
+
+    state = {
+        "messages": [
+            HumanMessage(content="Remember this"),
+            AIMessage(content="Remembered."),
+        ]
+    }
+    await middleware.aafter_agent(state, None)  # type: ignore[arg-type]
+
+    assert len(calls) == 1
+    assert calls[0] == ("Remember this", "Remembered.")

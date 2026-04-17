@@ -32,6 +32,34 @@ def _get_tavily_client() -> TavilyClient | None:
     return _tavily_client  # type: ignore[return-value]
 
 
+def _inject_api_key(url: str) -> str:
+    """Inject server-side API keys into URLs that require them.
+
+    Keeps credentials out of the system prompt and LLM traces by
+    substituting keys at the tool layer from environment variables.
+
+    Args:
+        url: The URL to potentially inject credentials into.
+
+    Returns:
+        URL with credentials injected if applicable, otherwise unchanged.
+    """
+    import os
+
+    # Alchemy: append key if URL ends at /v2/ or /v2 with no key after it
+    if ".g.alchemy.com/v2" in url:
+        key = os.environ.get("ALCHEMY_API_KEY", "")
+        if key and url.rstrip("/").endswith("/v2"):
+            url = url.rstrip("/") + "/" + key
+        elif key and "/v2/" in url:
+            # Replace placeholder segment after /v2/ if it looks wrong (empty or "demo")
+            base, _, after = url.partition("/v2/")
+            segment = after.split("/")[0]
+            if not segment or segment in ("demo", "YOUR_KEY", "{ALCHEMY_API_KEY}"):
+                url = base + "/v2/" + key + (after[len(segment):] if after[len(segment):] else "")
+    return url
+
+
 def http_request(
     url: str,
     method: str = "GET",
@@ -54,6 +82,8 @@ def http_request(
         Dictionary with response data including status, headers, and content
     """
     import requests
+
+    url = _inject_api_key(url)
 
     try:
         kwargs: dict[str, Any] = {}
@@ -106,6 +136,10 @@ def web_search(  # noqa: ANN201 - Tavily-first web search adapter
     max_results: int = 5,
     topic: Literal["general", "news", "finance"] = "general",
     include_raw_content: bool = False,
+    search_depth: Literal["basic", "advanced"] = "basic",
+    time_range: Literal["day", "week", "month", "year"] | None = None,
+    include_domains: list[str] | None = None,
+    exclude_domains: list[str] | None = None,
     *,
     fallback_to_hyperbrowser: bool = True,
 ):
@@ -120,11 +154,23 @@ def web_search(  # noqa: ANN201 - Tavily-first web search adapter
         max_results: Number of results to return (default 5).
         topic: Search category — "general", "news", or "finance".
         include_raw_content: Include raw page content in results.
+        search_depth: "basic" (fast, default) or "advanced" (deeper, slower, higher quality).
+        time_range: Recency filter — "day", "week", "month", "year", or None for all time.
+        include_domains: Limit results to these domains (e.g. ["reddit.com", "arxiv.org"]).
+        exclude_domains: Exclude results from these domains.
 
     Returns:
         Dict with `results` list and `query`, or `error` key on failure.
     """
     import re
+
+    # Sanitize empty-string / empty-list args that Cerebras may pass
+    if not time_range:
+        time_range = None
+    if not include_domains:
+        include_domains = None
+    if not exclude_domains:
+        exclude_domains = None
 
     # Parse optional site:domain from the query
     site_domain: str | None = None
@@ -137,11 +183,23 @@ def web_search(  # noqa: ANN201 - Tavily-first web search adapter
     # Call the Tavily provider wrapper
     try:
         from deepagents_cli.providers import tavily as tavily_provider
+
+        # Merge site:domain from query with explicit include_domains
+        all_domains: list[str] | None = list(include_domains or [])
+        if site_domain and site_domain not in all_domains:
+            all_domains.append(site_domain)
+        if not all_domains:
+            all_domains = None
+
         out = tavily_provider.search(
             stripped_query or query,
             max_results=max_results,
             include_raw_content=include_raw_content,
             topic=topic,
+            search_depth=search_depth,
+            time_range=time_range,
+            include_domains=all_domains,
+            exclude_domains=exclude_domains,
             site_domain=site_domain,
         )
     except Exception as e:
@@ -341,6 +399,76 @@ def firecrawl_scrape(site_domain: str, *, query: str | None = None, max_results:
         return normalize_and_score_results(out, query=query or f"site:{site_domain}", site_domain=site_domain, max_results=max_results)
     except Exception as e:
         return {"error": f"Firecrawl search failed: {e!s}", "query": query or f"site:{site_domain}"}
+
+
+def tavily_extract(urls: list[str], include_raw_content: bool = False) -> dict[str, Any]:
+    """Extract clean content from one or more URLs using Tavily Extract.
+
+    Use when you have specific URLs and want their content without rendering
+    JavaScript. More reliable than a simple fetch for bot-protected pages.
+
+    Args:
+        urls: List of URLs to extract content from.
+        include_raw_content: Include raw HTML alongside extracted content.
+
+    Returns:
+        Dict with `results` list (each with url, content) or `error` key.
+    """
+    try:
+        from deepagents_cli.providers import tavily as tavily_provider
+
+        return tavily_provider.extract(urls, include_raw_content=include_raw_content)
+    except Exception as e:
+        return {"error": f"Tavily extract failed: {e!s}", "urls": urls}
+
+
+def tavily_crawl(
+    url: str,
+    max_depth: int = 2,
+    max_pages: int = 10,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Crawl a website starting from a URL using Tavily Crawl.
+
+    Follows links up to `max_depth` levels deep and returns content from
+    each discovered page. Use for mapping out and reading multi-page sites.
+
+    Args:
+        url: Starting URL to crawl.
+        max_depth: Maximum link depth to follow (default 2).
+        max_pages: Maximum pages to crawl (default 10).
+        limit: Maximum results to return (default 10).
+
+    Returns:
+        Dict with `results` list of crawled pages or `error` key.
+    """
+    try:
+        from deepagents_cli.providers import tavily as tavily_provider
+
+        return tavily_provider.crawl(url, max_depth=max_depth, max_pages=max_pages, limit=limit)
+    except Exception as e:
+        return {"error": f"Tavily crawl failed: {e!s}", "url": url}
+
+
+def tavily_map(url: str, instructions: str | None = None) -> dict[str, Any]:
+    """Map a website's structure using Tavily Map.
+
+    Returns a sitemap-like list of all discovered URLs on the site.
+    Use to discover pages before extracting or crawling specific ones.
+
+    Args:
+        url: Website URL to map.
+        instructions: Optional natural-language filter (e.g. "only blog posts").
+
+    Returns:
+        Dict with `urls` list of discovered page URLs or `error` key.
+    """
+    try:
+        from deepagents_cli.providers import tavily as tavily_provider
+
+        return tavily_provider.map_url(url, instructions=instructions)
+    except Exception as e:
+        return {"error": f"Tavily map failed: {e!s}", "url": url}
 
 
 def normalize_and_score_results(

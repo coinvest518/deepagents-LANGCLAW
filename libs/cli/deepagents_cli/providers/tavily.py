@@ -26,13 +26,31 @@ def search(
     max_results: int = 5,
     include_raw_content: bool = False,
     topic: str = "general",
+    search_depth: str = "basic",
+    time_range: str | None = None,
+    include_domains: list[str] | None = None,
+    exclude_domains: list[str] | None = None,
     site_domain: str | None = None,
     session_params: dict | None = None,
     crawl_params: dict | None = None,
 ) -> Any:
     """Run a Tavily search and return the raw provider response.
 
-    Raises RuntimeError if Tavily is not configured/available.
+    Args:
+        query: Search query string.
+        max_results: Number of results to return.
+        include_raw_content: Include raw page content in results.
+        topic: Search category — "general", "news", or "finance".
+        search_depth: "basic" (fast) or "advanced" (deeper, slower).
+        time_range: Recency filter — "day", "week", "month", "year", or None.
+        include_domains: Limit results to these domains.
+        exclude_domains: Exclude results from these domains.
+        site_domain: Legacy shorthand — adds a single domain to include_domains.
+        session_params: Extra SDK kwargs to pass through.
+        crawl_params: Extra kwargs for the crawl fallback.
+
+    Raises:
+        RuntimeError: If Tavily is not configured/available.
     """
     client = _get_client()
     if client is None:
@@ -43,11 +61,19 @@ def search(
         "max_results": max_results,
         "include_raw_content": include_raw_content,
         "topic": topic,
+        "search_depth": search_depth,
     }
-    if site_domain:
-        # prefer domain-limited search, but if that returns empty,
-        # attempt page extraction or crawl for the site homepage
-        kwargs["include_domains"] = [site_domain]
+    if time_range:
+        kwargs["time_range"] = time_range
+
+    # Build domain filters
+    domains: list[str] = list(include_domains or [])
+    if site_domain and site_domain not in domains:
+        domains.append(site_domain)
+    if domains:
+        kwargs["include_domains"] = domains
+    if exclude_domains:
+        kwargs["exclude_domains"] = exclude_domains
 
     # 1) Try search. If `session_params` contains SDK-specific options, try to
     # pass them through; if the SDK rejects unexpected kwargs, fall back to
@@ -85,6 +111,8 @@ def search(
     normalized = _normalize(out)
 
     # 2) If site_domain was provided but search returned empty, try extract/crawl
+    if (site_domain or domains) and not normalized["results"]:
+        site_domain = site_domain or (domains[0] if domains else None)
     if site_domain and not normalized["results"]:
         # Try extract(page) first
         try:
@@ -126,3 +154,107 @@ def search(
             pass
 
     return normalized
+
+
+def extract(urls: list[str], *, include_raw_content: bool = False) -> dict[str, Any]:
+    """Extract content from one or more URLs using Tavily Extract.
+
+    Args:
+        urls: List of URLs to extract content from.
+        include_raw_content: Include raw HTML alongside extracted content.
+
+    Returns:
+        Dict with `results` list (each with url, content, raw_content).
+
+    Raises:
+        RuntimeError: If Tavily is not configured.
+    """
+    client = _get_client()
+    if client is None:
+        raise RuntimeError("Tavily client not configured")
+
+    try:
+        out = client.extract(urls=urls, include_raw_content=include_raw_content)
+    except TypeError:
+        # Older SDK versions may not accept include_raw_content
+        out = client.extract(urls=urls)
+
+    if isinstance(out, dict):
+        return {"results": out.get("results", []), "urls": urls}
+    if isinstance(out, list):
+        return {"results": out, "urls": urls}
+    return {"results": [], "urls": urls}
+
+
+def crawl(
+    url: str,
+    *,
+    max_depth: int = 2,
+    max_pages: int = 10,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Crawl a website starting from a URL using Tavily Crawl.
+
+    Args:
+        url: Starting URL to crawl.
+        max_depth: Maximum link depth to follow.
+        max_pages: Maximum number of pages to crawl.
+        limit: Maximum results to return.
+
+    Returns:
+        Dict with `results` list of crawled pages.
+
+    Raises:
+        RuntimeError: If Tavily is not configured.
+    """
+    client = _get_client()
+    if client is None:
+        raise RuntimeError("Tavily client not configured")
+
+    kwargs: dict[str, Any] = {"max_depth": max_depth, "limit": limit}
+    try:
+        out = client.crawl(url, **kwargs)
+    except TypeError:
+        out = client.crawl(url)
+
+    if isinstance(out, dict):
+        return {"results": out.get("results", []), "url": url}
+    if isinstance(out, list):
+        return {"results": out, "url": url}
+    return {"results": [], "url": url}
+
+
+def map_url(url: str, *, instructions: str | None = None) -> dict[str, Any]:
+    """Map a website's structure using Tavily Map (returns sitemap-like URLs).
+
+    Args:
+        url: Website URL to map.
+        instructions: Optional natural-language instructions for filtering.
+
+    Returns:
+        Dict with `urls` list of discovered page URLs.
+
+    Raises:
+        RuntimeError: If Tavily is not configured or Map is not available.
+    """
+    client = _get_client()
+    if client is None:
+        raise RuntimeError("Tavily client not configured")
+
+    if not hasattr(client, "map"):
+        raise RuntimeError("Tavily Map not available in this SDK version")
+
+    kwargs: dict[str, Any] = {}
+    if instructions:
+        kwargs["instructions"] = instructions
+
+    try:
+        out = client.map(url, **kwargs)
+    except TypeError:
+        out = client.map(url)
+
+    if isinstance(out, dict):
+        return {"urls": out.get("urls", out.get("results", [])), "url": url}
+    if isinstance(out, list):
+        return {"urls": out, "url": url}
+    return {"urls": [], "url": url}

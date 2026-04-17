@@ -38,12 +38,21 @@ result = client.tools.execute("NOTION_CREATE_NOTION_PAGE", arguments={"parent_id
 print(json.dumps(result, default=str)[:2000])
 ```
 
-## Direct tools (no Python needed)
-`NOTION_ADD_PAGE_CONTENT` and `NOTION_SEARCH_NOTION_PAGE` are wired as direct tools — call them without any Python code.
-
 **RULE:** Use exact slugs from this file. Never guess action names.
 **RULE:** Use workspace IDs below directly — do NOT call NOTION_FETCH_DATA unless you need a child ID not listed here.
 **RULE:** After creating a page, use the returned page_id immediately to add content — no re-fetch needed.
+**RULE:** STOP reading after you have the action slug and parameters you need. Do NOT grep or read more of this file — just call `composio_action`.
+**RULE:** Always call `composio_action` directly. Do NOT pause, plan, or write text to the user mid-task — execute the action immediately.
+
+## Quick Reference — All Action Slugs
+
+`NOTION_CREATE_NOTION_PAGE` `NOTION_APPEND_TEXT_BLOCKS` `NOTION_ADD_MULTIPLE_PAGE_CONTENT`
+`NOTION_REPLACE_PAGE_CONTENT` `NOTION_UPDATE_PAGE` `NOTION_RETRIEVE_PAGE`
+`NOTION_FETCH_ALL_BLOCK_CONTENTS` `NOTION_CREATE_DATABASE` `NOTION_INSERT_ROW_DATABASE`
+`NOTION_INSERT_ROW_FROM_NL` `NOTION_QUERY_DATABASE` `NOTION_QUERY_DATABASE_WITH_FILTER`
+`NOTION_UPDATE_ROW_DATABASE` `NOTION_UPSERT_ROW_DATABASE` `NOTION_FETCH_ROW`
+`NOTION_FETCH_DATABASE` `NOTION_UPDATE_SCHEMA_DATABASE` `NOTION_SEARCH_NOTION_PAGE`
+`NOTION_DELETE_BLOCK` `NOTION_MOVE_PAGE` `NOTION_CREATE_COMMENT`
 
 ---
 

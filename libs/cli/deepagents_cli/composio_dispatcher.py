@@ -1,264 +1,167 @@
-"""composio_dispatcher.py — single-tool entry point for all Composio actions.
+"""Lightweight Composio dispatcher used by agents.
 
-Instead of registering 48+ individual LangChain tools (which overwhelms the
-LLM's tool-selection), we expose ONE tool: composio_action().
-
-The agent learns which action names exist by reading the composio SKILL.md.
-Account routing (connected_account_id) is handled automatically based on the
-action prefix, using the composio_router table.
+Provides a small, defensive helper to execute Composio actions via the
+Composio HTTP execute endpoint. Returns a consistent shape so calling
+code can handle failures gracefully.
 """
 from __future__ import annotations
 
-import json
-import logging
 import os
-from typing import Any
+import json
+from typing import Any, Dict, Optional
 
-from langchain_core.tools import tool
+try:
+    import requests
+except Exception:  # pragma: no cover - network optional
+    requests = None
 
-logger = logging.getLogger(__name__)
 
-# Special prefix mapping: GOOGLESHEETS uses the Drive account (not sheets-native)
-_PREFIX_OVERRIDE: dict[str, str] = {
-    "googlesheets": "googledrive",
+_SERVICE_ACCOUNT_OVERRIDES: Dict[str, str] = {
+    # Google Sheets native token is broken — use the Google Drive OAuth account
+    "GOOGLESHEETS": "COMPOSIO_GOOGLEDRIVE_ACCOUNT_ID",
 }
 
 
-def _smart_truncate(data: dict | str, max_chars: int = 6000) -> str:
-    """Compress tool results intelligently instead of blind character truncation.
+def _resolve_account_for_service(action_slug: str) -> Optional[str]:
+    """Resolve an account env var based on the action slug prefix.
 
-    For dict results (JSON from APIs like Gmail):
-    - Preserves metadata fields (labels, folders, ids, subjects, senders)
-    - Strips large body/payload/content fields first
-    - Summarises list items if there are too many
-    - Always produces valid, readable output
+    Example: GMAIL_SEND_EMAIL -> COMPOSIO_GMAIL_ACCOUNT_ID
 
-    For string results: truncates at a line boundary.
+    Some services need a different account (e.g. Google Sheets uses Drive OAuth).
     """
-    if isinstance(data, str):
-        if len(data) <= max_chars:
-            return data
-        # Truncate at last newline before limit
-        cut = data[:max_chars].rfind("\n")
-        if cut < max_chars // 2:
-            cut = max_chars - 200
-        return data[:cut] + f"\n\n[TRUNCATED — {len(data)} chars total. Use the data above to respond.]"
-
-    # Dict: strip heavy fields, keep metadata
-    _HEAVY_KEYS = {"body", "payload", "raw", "htmlBody", "html_body", "content",
-                   "textBody", "text_body", "snippet", "raw_content", "data",
-                   "attachments", "parts", "headers"}
-    _KEEP_KEYS = {"id", "threadId", "labelIds", "label_ids", "subject", "from",
-                  "to", "date", "snippet", "name", "email", "folder", "label",
-                  "sender", "recipient", "internalDate", "historyId"}
-
-    def _slim(obj: Any, depth: int = 0) -> Any:
-        if isinstance(obj, dict):
-            slimmed = {}
-            for k, v in obj.items():
-                if k.lower() in {hk.lower() for hk in _HEAVY_KEYS} and depth > 0:
-                    if isinstance(v, str) and len(v) > 200:
-                        slimmed[k] = v[:200] + "...[trimmed]"
-                    elif isinstance(v, (list, dict)):
-                        slimmed[k] = f"[{type(v).__name__}, {len(v)} items — trimmed]"
-                    else:
-                        slimmed[k] = v
-                else:
-                    slimmed[k] = _slim(v, depth + 1)
-            return slimmed
-        elif isinstance(obj, list):
-            if len(obj) > 5:
-                return [_slim(item, depth + 1) for item in obj[:5]] + [
-                    f"...and {len(obj) - 5} more items"
-                ]
-            return [_slim(item, depth + 1) for item in obj]
-        return obj
-
-    slimmed = _slim(data)
-    text = json.dumps(slimmed, indent=2, default=str)
-    if len(text) > max_chars:
-        # Still too big — fall back to line-boundary truncation
-        cut = text[:max_chars].rfind("\n")
-        if cut < max_chars // 2:
-            cut = max_chars - 200
-        text = text[:cut] + f"\n\n[TRUNCATED — trimmed result still too large. Use the data above to respond.]"
-    return text
-
-
-def _get_account_id(action: str) -> str | None:
-    """Return the connected_account_id for an action based on its toolkit prefix.
-
-    Returns None if the toolkit is unknown (caller should skip connected_account_id).
-    """
-    raw_prefix = action.split("_", maxsplit=1)[0].lower()
-    toolkit = _PREFIX_OVERRIDE.get(raw_prefix, raw_prefix)
-    try:
-        from deepagents_cli.composio_router import get_account
-        return get_account(toolkit)["account_id"]
-    except (KeyError, ValueError):
+    if not action_slug or "_" not in action_slug:
         return None
+    service = action_slug.split("_", 1)[0].upper()
+    env_key = _SERVICE_ACCOUNT_OVERRIDES.get(service, f"COMPOSIO_{service}_ACCOUNT_ID")
+    return os.environ.get(env_key)
 
 
-@tool
-def composio_get_schema(action: str) -> str:
-    """Get the full parameter schema for any Composio action.
+def dispatch(action_slug: str, arguments: Dict[str, Any], hint_account_env: Optional[str] = None, timeout: int = 30) -> Dict[str, Any]:
+    """Dispatch a Composio action.
 
-    Call this BEFORE using an action for the first time, or when a previous
-    call failed or returned unexpected results.  It tells you exactly what
-    arguments the action accepts, their types, defaults, and descriptions.
-
-    This is how you LEARN and SELF-CORRECT:
-    - Before calling an unfamiliar action, check its schema first.
-    - If composio_action returned an error or wrong data, call this to see
-      what parameters you should have used.
-    - Use the schema to build the correct arguments dict.
-
-    Args:
-        action: Composio action slug (e.g. "GMAIL_FETCH_EMAILS", "GITHUB_LIST_REPOSITORY_ISSUES")
-
-    Returns:
-        JSON schema showing all parameters, their types, defaults, and descriptions.
+    Returns a dict with `success`, and either `result` or `error`.
     """
+    api_key = os.environ.get("COMPOSIO_API_KEY")
+    api_url = os.environ.get("COMPOSIO_API_URL")
+
+    if not api_key or not api_url:
+        return {"success": False, "error": "COMPOSIO not configured (COMPOSIO_API_KEY or COMPOSIO_API_URL missing)"}
+
+    account_id = None
+    if hint_account_env:
+        account_id = os.environ.get(hint_account_env)
+    if not account_id:
+        account_id = _resolve_account_for_service(action_slug)
+
+    payload = {"action": action_slug, "arguments": arguments}
+    if account_id:
+        payload["account_id"] = account_id
+
+    if requests is None:
+        return {"success": False, "error": "requests library not available to call Composio API"}
+
+    try:
+        resp = requests.post(
+            f"{api_url.rstrip('/')}/v1/execute",
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"status_code": resp.status_code, "text": resp.text}
+
+        if 200 <= resp.status_code < 300:
+            return {"success": True, "result": data}
+        return {"success": False, "error": f"Composio error: status={resp.status_code} body={data}"}
+
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+# Compatibility wrappers expected by the CLI/tooling: `composio_action` and `composio_get_schema`.
+def _maybe_tool_decorator():
+    try:
+        from langchain_core.tools import tool
+        return tool
+    except Exception:
+        return lambda f: f
+
+
+@_maybe_tool_decorator()
+def composio_get_schema(action: str) -> str:
+    """Return a compact JSON schema for an action, or an error string.
+
+    Only call this when the action slug is NOT documented in the loaded skill file.
+    If the skill file already lists parameters for the action, call composio_action directly.
+    """
+    try:
+        from composio import Composio  # type: ignore
+    except Exception:
+        return "ERROR: composio SDK not installed"
+
     api_key = os.environ.get("COMPOSIO_API_KEY", "")
     if not api_key:
         return "ERROR: COMPOSIO_API_KEY not set"
 
     try:
-        from composio import Composio
         client = Composio(api_key=api_key)
         raw = client.tools.get_raw_composio_tool_by_slug(action)
-
-        # Extract the input parameters schema
-        params = getattr(raw, 'input_parameters', None)
+        # try to extract input_parameters
+        params = getattr(raw, "input_parameters", None)
         if params is None and isinstance(raw, dict):
-            params = raw.get('input_parameters', {})
-        if hasattr(params, '__dict__'):
+            params = raw.get("input_parameters", {})
+        if hasattr(params, "__dict__"):
             params = params.__dict__
-
-        # Also get the description
-        desc = getattr(raw, 'description', '') or ''
-
-        result = {
-            "action": action,
-            "description": desc[:500],
-            "parameters": {},
-        }
-
-        if isinstance(params, dict) and 'properties' in params:
-            for name, info in params['properties'].items():
-                param_info: dict[str, Any] = {"type": info.get("type", "unknown")}
-                if "description" in info:
-                    param_info["description"] = info["description"][:200]
-                if "default" in info:
-                    param_info["default"] = info["default"]
-                if "enum" in info:
-                    param_info["enum"] = info["enum"]
-                if "items" in info:
-                    param_info["items"] = info["items"]
-                if "examples" in info:
-                    param_info["examples"] = info["examples"][:3]
-                result["parameters"][name] = param_info
-
-            required = params.get("required", [])
-            if required:
-                result["required"] = required
-
-        text = json.dumps(result, indent=2, default=str)
-        if len(text) > 6000:
-            text = _smart_truncate(result, max_chars=6000)
-        return text
+        out = {"action": action, "parameters": params if params is not None else {}}
+        return json.dumps(out, default=str)
     except Exception as exc:
-        logger.warning("composio_get_schema failed: %s — %s", action, exc)
         return f"ERROR: Could not get schema for {action}: {exc}"
 
 
-@tool
-def composio_action(action: str, arguments: dict[str, Any] | str | None = None) -> str:
-    """Execute any Composio action by name.
+@_maybe_tool_decorator()
+def composio_action(action: str, arguments: dict | str | None = None) -> str:
+    """Execute a composio action (compat wrapper).
 
-    Use this for ALL connected service operations: Gmail, GitHub, Google Drive,
-    Google Docs, Google Sheets, Google Analytics, LinkedIn, Twitter, Telegram,
-    Instagram, Facebook, YouTube, Slack, Notion, Dropbox, SerpAPI, and more.
+    Uses the Composio Python SDK to execute the action, automatically resolving
+    the connected account ID from the environment.
 
-    Read the 'composio' skill to find available action names and their required
-    arguments. The skill lists actions grouped by service.
-
-    Args:
-        action: Composio action slug in SCREAMING_SNAKE_CASE.
-                Examples: "GMAIL_SEND_EMAIL", "GITHUB_LIST_REPOSITORY_ISSUES",
-                "GOOGLEDRIVE_LIST_FILES", "SLACK_FETCH_CHANNELS",
-                "TWITTER_CREATION_OF_A_POST"
-        arguments: Dict of arguments the action requires.
-                   Pass an empty dict {} or omit for actions with no required args.
-
-    Returns:
-        Action result as a JSON string, or an error message starting with ERROR:.
-
-    Examples:
-        composio_action("GMAIL_FETCH_EMAILS", {"max_results": 5})
-        composio_action("GITHUB_LIST_REPOSITORY_ISSUES",
-                        {"owner": "octocat", "repo": "Hello-World"})
-        composio_action("GOOGLEDRIVE_LIST_FILES", {})
-        composio_action("SLACK_FETCH_CHANNELS", {})
-        composio_action("TWITTER_CREATION_OF_A_POST", {"text": "Hello world!"})
+    Returns a JSON string on success or an error string starting with ERROR:.
     """
-    # LLMs sometimes pass arguments as a JSON string instead of a dict — coerce it.
+    try:
+        from composio import Composio  # type: ignore
+    except Exception:
+        return "ERROR: composio SDK not installed"
+
+    # Coerce argument shapes
     if isinstance(arguments, str):
-        stripped = arguments.strip()
-        if stripped in ("", "null", "none", "undefined", "{}", "[]"):
+        s = arguments.strip()
+        if s in ("", "null", "none", "undefined"):
             arguments = {}
         else:
             try:
-                arguments = json.loads(stripped)
-            except json.JSONDecodeError:
+                arguments = json.loads(s)
+            except Exception:
                 arguments = {}
     if arguments is None:
         arguments = {}
 
     api_key = os.environ.get("COMPOSIO_API_KEY", "")
     if not api_key:
-        return "ERROR: COMPOSIO_API_KEY not set in environment"
+        return "ERROR: COMPOSIO_API_KEY not set"
 
-    account_id = _get_account_id(action)
+    account_id = _resolve_account_for_service(action)
 
     try:
-        from composio import Composio  # type: ignore[import-untyped]
         client = Composio(api_key=api_key)
-        kwargs: dict[str, Any] = {
-            "dangerously_skip_version_check": True,
-        }
+        kwargs: Dict[str, Any] = {"dangerously_skip_version_check": True}
         if account_id:
             kwargs["connected_account_id"] = account_id
         result = client.tools.execute(action, arguments=arguments, **kwargs)
-        # Normalise result to a clean string — smart compression for large payloads
-        if isinstance(result, dict):
-            text = json.dumps(result, indent=2, default=str)
-        else:
-            text = str(result)
-        if len(text) > 6000:
-            text = _smart_truncate(result if isinstance(result, dict) else text, max_chars=6000)
-        return text
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("composio_action failed: %s %s — %s", action, arguments, exc)
-        err_str = str(exc)
-        if "404" in err_str or "not found" in err_str.lower():
-            # Slug itself is wrong — composio_get_schema would also 404
-            toolkit = action.split("_", maxsplit=1)[0]
-            hint = (
-                f"ERROR: {exc}\n\n"
-                f"ACTION SLUG '{action}' DOES NOT EXIST. Do NOT retry with the same slug.\n"
-                f"FIX: Read the '{toolkit.lower()}' skill documentation to find the EXACT "
-                f"correct action slug. Composio action names are specific — common mistakes:\n"
-                f"  - NOTION_ADD_BLOCK → NOTION_APPEND_TEXT_BLOCKS\n"
-                f"  - NOTION_FETCH_PAGE → NOTION_RETRIEVE_PAGE\n"
-                f"  - GMAIL_GET_EMAILS → GMAIL_FETCH_EMAILS\n"
-                f"The skill file has a 'wrong slug → correct slug' mapping table."
-            )
-        else:
-            # Action exists but call failed — check parameters
-            hint = (
-                f"ERROR: {exc}\n\n"
-                f"HINT: Call composio_get_schema(\"{action}\") to see the correct "
-                f"parameters. Check parameter names, types, and required fields."
-            )
-        return hint
+        try:
+            return json.dumps(result, default=str)
+        except Exception:
+            return str(result)
+    except Exception as exc:
+        return f"ERROR: Composio error: {exc}"
