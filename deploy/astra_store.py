@@ -20,6 +20,11 @@ from collections import deque
 
 logger = logging.getLogger("deepagents.astra_store")
 
+# astrapy logs the raw HTTP response at WARN *before* our code can catch
+# exceptions. The 100-index-limit case is already handled below — suppress
+# the pre-exception noise so logs only show our own handled warning.
+logging.getLogger("astrapy.utils.api_commander").setLevel(logging.ERROR)
+
 _KEYSPACE = os.environ.get("ASTRA_DB_KEYSPACE", "default_keyspace")
 
 # Module-level cache — collection objects are created once and reused.
