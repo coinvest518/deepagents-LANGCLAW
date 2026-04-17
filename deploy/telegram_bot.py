@@ -1652,7 +1652,8 @@ async def start_api_server(agent: object) -> None:
         async with _api_locks[thread_id]:
             try:
                 # Everything goes through the real LangGraph agent.
-                result = await _run_agent(agent, message, thread_id, collect_steps=True)
+                agent_input = {"messages": [{"role": "user", "content": message}]}
+                result = await _run_agent(agent, agent_input, thread_id, collect_steps=True)
                 response, _interrupts, steps_info = result  # type: ignore[misc]
                 task_store.done(task_id, response)
                 conversation_store.append(thread_id, "agent", response)
