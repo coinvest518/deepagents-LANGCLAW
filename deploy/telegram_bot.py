@@ -20,14 +20,17 @@ Required environment variables
 -------------------------------
 BOT_TOKEN            Telegram bot token from @BotFather
 
-One of:
-  ANTHROPIC_API_KEY  For claude-* models  (default)
-  OPENAI_API_KEY     For gpt-* / o* models
-  GOOGLE_API_KEY     For gemini-* models
+One of these model/provider credentials, or set `DA_MODEL` explicitly:
+  ANTHROPIC_API_KEY  For Claude models
+  OPENAI_API_KEY     For OpenAI GPT models
+  GOOGLE_API_KEY     For Gemini models
+  OPENROUTER_API_KEY For OpenRouter models
+  NVIDIA_API_KEY     For NVIDIA models
+  HUGGINGFACEHUB_API_TOKEN For Hugging Face models
 
 Optional environment variables
 -------------------------------
-DA_MODEL             Model spec (default: anthropic:claude-sonnet-4-6)
+DA_MODEL             Model spec (explicit override; no default if unset)
 DA_AGENT_ID          Agent name / identity (default: "default")
 DA_AUTO_APPROVE      "1" auto-approves all tool calls (default: "1")
 DA_ENABLE_SHELL      "1" allows shell tool in the container (default: "0")
@@ -58,6 +61,10 @@ for _lib in ("libs/cli", "libs/deepagents"):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+import json
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(dotenv_path=_REPO / ".env", override=False)
@@ -219,6 +226,15 @@ else:
     ENABLE_SHELL = _shell_env.lower() in {"1", "true", "yes"}
 DASHBOARD_SECRET: str = os.environ.get("DASHBOARD_SECRET", "")
 API_PORT: int = int(os.environ.get("PORT", "10000"))
+# Optional: enable webhook mode instead of long-polling.
+# Default is webhook mode to avoid auto polling conflicts and only connect
+# to Telegram when the webhook endpoint is configured or polling is explicitly enabled.
+TELEGRAM_USE_WEBHOOK: bool = os.environ.get("TELEGRAM_USE_WEBHOOK", "1").lower() in {"1", "true", "yes"}
+TELEGRAM_SET_WEBHOOK: bool = os.environ.get("TELEGRAM_SET_WEBHOOK", "0").lower() in {"1", "true", "yes"}
+# Secret path segment for the webhook URL. Default chosen for quick testing
+# but recommend setting a random value in production.
+TELEGRAM_WEBHOOK_SECRET: str = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "telegram-webhook")
+PUBLIC_URL: str = os.environ.get("PUBLIC_URL") or os.environ.get("RENDER_AGENT_URL") or os.environ.get("RENDER_EXTERNAL_URL") or ""
 
 # ---------------------------------------------------------------------------
 # Imports (after path setup)
@@ -1612,7 +1628,7 @@ def _check_secret(request: object) -> bool:
         return False
 
 
-async def start_api_server(agent: object) -> None:
+async def start_api_server(agent: object, bot: object | None = None) -> None:
     """Run a lightweight aiohttp HTTP server exposing /health and /chat."""
     try:
         from aiohttp import web
@@ -1735,6 +1751,162 @@ async def start_api_server(agent: object) -> None:
             # Best-effort: return whatever AstraDB has
             fallback = conversation_store.get_history(thread_id)
             return web.json_response({"messages": fallback, "thread_id": thread_id})
+
+    async def tts_handler(request: web.Request) -> web.Response:
+        if not _check_secret(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        text = (data.get("text") or data.get("message") or "").strip()
+        if not text:
+            return web.json_response({"error": "text is required"}, status=400)
+
+        try:
+            from voice_handler import synthesize_any  # type: ignore
+        except Exception:
+            return web.json_response({"error": "TTS not available"}, status=501)
+
+        result = await asyncio.to_thread(synthesize_any, text)
+        if not result:
+            return web.json_response({"error": "TTS failed — browser should fall back"}, status=502)
+
+        audio, provider = result
+        return web.Response(
+            body=audio,
+            content_type="audio/mpeg",
+            headers={"X-TTS-Provider": provider},
+        )
+
+    async def stt_handler(request: web.Request) -> web.Response:
+        """Transcribe-only endpoint. Returns {transcript} so the frontend can
+        feed the text through the normal streaming agent pipeline."""
+        if not _check_secret(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            reader = await request.multipart()
+        except Exception:
+            return web.json_response({"error": "Invalid multipart data"}, status=400)
+
+        audio_path: Path | None = None
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "audio":
+                filename = part.filename or f"voice_{uuid.uuid4()}.webm"
+                ext = Path(filename).suffix.lower() or ".webm"
+                if ext not in {".ogg", ".wav", ".mp3", ".webm", ".m4a"}:
+                    ext = ".webm"
+                _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+                audio_path = _UPLOAD_DIR / f"stt_{uuid.uuid4()}{ext}"
+                with audio_path.open("wb") as fh:
+                    while True:
+                        chunk = await part.read_chunk()
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+
+        if audio_path is None:
+            return web.json_response({"error": "audio field is required"}, status=400)
+
+        try:
+            from voice_handler import transcribe  # type: ignore
+        except Exception:
+            return web.json_response({"error": "Voice transcription unavailable"}, status=501)
+
+        transcript = await asyncio.to_thread(transcribe, audio_path)
+        try:
+            audio_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        if not transcript.strip():
+            return web.json_response({"error": "Unable to transcribe audio"}, status=400)
+
+        return web.json_response({"transcript": transcript.strip()})
+
+    async def voice_handler_route(request: web.Request) -> web.Response:
+        if not _check_secret(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        try:
+            reader = await request.multipart()
+        except Exception:
+            return web.json_response({"error": "Invalid multipart data"}, status=400)
+
+        audio_path: Path | None = None
+        raw_thread = "dashboard-default"
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "audio":
+                filename = part.filename or f"voice_{uuid.uuid4()}.webm"
+                ext = Path(filename).suffix.lower() or ".webm"
+                if ext not in {".ogg", ".wav", ".mp3", ".webm", ".m4a"}:
+                    ext = ".webm"
+                _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+                audio_path = _UPLOAD_DIR / f"dashboard_voice_{uuid.uuid4()}{ext}"
+                with audio_path.open("wb") as fh:
+                    while True:
+                        chunk = await part.read_chunk()
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+            elif part.name == "thread_id":
+                raw_thread = (await part.text()).strip() or raw_thread
+
+        if audio_path is None:
+            return web.json_response({"error": "audio field is required"}, status=400)
+
+        try:
+            from voice_handler import transcribe  # type: ignore
+        except Exception:
+            return web.json_response({"error": "Voice transcription unavailable"}, status=501)
+
+        transcript = await asyncio.to_thread(transcribe, audio_path)
+        try:
+            audio_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        if not transcript.strip():
+            return web.json_response({"error": "Unable to transcribe audio"}, status=400)
+
+        raw_thread = raw_thread or "dashboard-default"
+        thread_id = _to_uuid(raw_thread)
+        if thread_id not in _api_locks:
+            _api_locks[thread_id] = asyncio.Lock()
+
+        task_id = str(uuid.uuid4())
+        task_store.start(task_id, thread_id, transcript, source="dashboard-voice")
+        conversation_store.append(thread_id, "user", transcript)
+
+        async with _api_locks[thread_id]:
+            try:
+                agent_input = {"messages": [{"role": "user", "content": transcript}]}
+                result = await _run_agent(agent, agent_input, thread_id, collect_steps=True)
+                response, _interrupts, steps_info = result  # type: ignore[misc]
+                task_store.done(task_id, response)
+                conversation_store.append(thread_id, "agent", response)
+                return web.json_response({
+                    "transcript": transcript,
+                    "response": response,
+                    "thread_id": thread_id,
+                    "task_id": task_id,
+                })
+            except Exception as exc:
+                logger.exception("HTTP /voice error")
+                task_store.fail(task_id, str(exc))
+                return web.json_response({
+                    "error": str(exc),
+                    "thread_id": thread_id,
+                    "task_id": task_id,
+                    "status": "incomplete",
+                }, status=500)
 
     # ------------------------------------------------------------------
     # SSE streaming endpoint — mirrors what the CLI shows in real time
@@ -1982,9 +2154,48 @@ async def start_api_server(agent: object) -> None:
             pass
         return resp
 
+    # Webhook route: when webhook mode is enabled, expose a Telegram
+    # webhook endpoint that forwards updates to the same handlers used
+    # by the long-polling bot. We intentionally keep the handler fast
+    # (offloads work into threads/tasks) so Telegram receives a quick 200.
+    def _register_telegram_webhook_route(app: object) -> None:  # type: ignore
+        if not TELEGRAM_USE_WEBHOOK or bot is None:
+            return
+
+        webhook_path = f"/telegram/{TELEGRAM_WEBHOOK_SECRET}" if TELEGRAM_WEBHOOK_SECRET else "/telegram"
+
+        async def _telegram_webhook(request: web.Request) -> web.Response:
+            try:
+                data = await request.json()
+            except Exception:
+                return web.json_response({"error": "Invalid JSON"}, status=400)
+
+            try:
+                # callback_query requires a quick async handler
+                if isinstance(data, dict) and "callback_query" in data:
+                    # call the HeadlessBot callback handler (async)
+                    try:
+                        await bot._handle_callback_query(data["callback_query"])  # type: ignore[attr-defined]
+                    except Exception:
+                        logger.exception("Error handling callback_query via webhook")
+                    return web.json_response({"ok": True})
+
+                # Non-callback updates: forward to synchronous handler in a thread
+                asyncio.create_task(asyncio.to_thread(bot._tg.handle_telegram_update, data))
+                return web.json_response({"ok": True})
+            except Exception:
+                logger.exception("Webhook processing failed")
+                return web.json_response({"error": "internal"}, status=500)
+
+        app.router.add_post(webhook_path, _telegram_webhook)
+
     app = web.Application()
+    _register_telegram_webhook_route(app)
     app.router.add_get("/health", health)
     app.router.add_post("/chat", chat)
+    app.router.add_post("/tts", tts_handler)
+    app.router.add_post("/voice", voice_handler_route)
+    app.router.add_post("/stt", stt_handler)
     app.router.add_post("/chat/stream", chat_stream)
     app.router.add_get("/tasks", tasks_handler)
     app.router.add_get("/history/{thread_id}", history_handler)
@@ -1994,6 +2205,30 @@ async def start_api_server(agent: object) -> None:
     site = web.TCPSite(runner, "0.0.0.0", API_PORT)
     await site.start()
     logger.info("HTTP API server listening on port %d", API_PORT)
+
+    # When webhook mode is enabled, clear any stuck getUpdates and
+    # optionally call setWebhook so Telegram forwards updates to us.
+    if TELEGRAM_USE_WEBHOOK:
+        try:
+            _clear_webhook()
+        except Exception:
+            logger.debug("deleteWebhook during startup failed (non-fatal)", exc_info=True)
+
+    if TELEGRAM_USE_WEBHOOK and bot is not None and TELEGRAM_SET_WEBHOOK and TELEGRAM_WEBHOOK_SECRET and PUBLIC_URL:
+        webhook_url = PUBLIC_URL.rstrip("/") + f"/telegram/{TELEGRAM_WEBHOOK_SECRET}"
+        try:
+            resp = requests.post(
+                f"{BASE_URL}/setWebhook",
+                json={"url": webhook_url, "allowed_updates": ["message", "callback_query"]},
+                timeout=10,
+            )
+            try:
+                desc = resp.json().get("description", resp.status_code)
+            except Exception:
+                desc = resp.status_code
+            logger.info("setWebhook → %s", desc)
+        except Exception:
+            logger.warning("setWebhook failed (non-fatal)", exc_info=True)
 
     # Keep alive — this coroutine runs alongside bot.run() via asyncio.gather
     while True:
@@ -2057,10 +2292,14 @@ async def main() -> None:
         no_mcp=True,
     ) as (agent, _server):
         bot = HeadlessBot(agent=agent)
-        await asyncio.gather(
-            bot.run(),
-            start_api_server(agent),
-        )
+        if TELEGRAM_USE_WEBHOOK:
+            logger.info("Webhook mode enabled — starting HTTP server (no polling)")
+            await start_api_server(agent, bot=bot)
+        else:
+            await asyncio.gather(
+                bot.run(),
+                start_api_server(agent, bot=bot),
+            )
 
 
 if __name__ == "__main__":

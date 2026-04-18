@@ -84,6 +84,7 @@ COMMAND_SUBAGENT_MAP: dict[str, str] = {
     "/code": "coder",
     "/review": "reviewer",
     "/agent": "general",
+    "/musa": "general",
 }
 
 

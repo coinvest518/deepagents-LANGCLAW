@@ -37,8 +37,10 @@ git push origin main
 2. Connect your **GitHub** account and select this repository.
 3. Render detects the Dockerfile automatically.  Confirm:
    - **Environment**: Docker
-   - **Dockerfile path**: `Dockerfile.render`
+   - **Dockerfile path**: `Dockerfile`
    - **Start command**: leave blank (uses the Dockerfile default)
+
+> Use `.env.example` as a local environment template. Copy it to `.env`, fill in secrets, and keep `.env` out of version control.
 
 ### 3  Set environment variables (secrets)
 
@@ -60,7 +62,7 @@ Non-secret settings (safe to commit in `render.yaml`):
 
 | Key | Default | Notes |
 |-----|---------|-------|
-| `DA_MODEL` | `anthropic:claude-sonnet-4-6` | Any supported model spec |
+| `DA_MODEL` | `` | Explicit model spec override; if omitted the agent picks a provider from the available credentials (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_API_KEY`, etc.) |
 | `DA_AUTO_APPROVE` | `1` | Auto-approve tool calls (no confirmation prompts) |
 | `DA_ENABLE_SHELL` | `0` | `1` enables shell execution in the container |
 

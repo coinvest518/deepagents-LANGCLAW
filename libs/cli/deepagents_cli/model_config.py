@@ -201,6 +201,7 @@ PROVIDER_API_KEY_ENV: dict[str, str] = {
     "moonshot": "MOONSHOT_API_KEY",
     "nebius": "NEBIUS_API_KEY",
     "nvidia": "NVIDIA_API_KEY",
+    "ollama_cloud": "OLLAMA_CLOUD_API_KEY",
     "openai": "OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "perplexity": "PPLX_API_KEY",

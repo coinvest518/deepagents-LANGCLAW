@@ -71,6 +71,42 @@ agent = create_deep_agent(
 
 MCP is supported via [`langchain-mcp-adapters`](https://github.com/langchain-ai/langchain-mcp-adapters).
 
+## Local development
+
+For local repo testing, copy the example env file and run the bot directly.
+
+1. Create a Python virtual environment and activate it:
+   - Windows PowerShell:
+     ```powershell
+     python -m venv .venv
+     .\.venv\Scripts\Activate.ps1
+     ```
+   - macOS / Linux:
+     ```bash
+     python3 -m venv .venv
+     source .venv/bin/activate
+     ```
+2. Install the dependencies:
+   ```bash
+   pip install -r requirements.txt
+   pip install aiohttp
+   ```
+3. Copy the env example and fill in your keys:
+   - Windows PowerShell: `copy .env.example .env`
+   - macOS / Linux: `cp .env.example .env`
+4. Set `USE_SANDBOX=none` for local testing and either:
+   - set `DA_MODEL` explicitly to a supported provider model string, or
+   - provide a supported provider key such as `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `NVIDIA_API_KEY`.
+5. Confirm `TELEGRAM_USE_WEBHOOK=1` in `.env` to disable automatic polling and use webhook-first mode.
+6. Start the bot server:
+   ```powershell
+   python deploy/telegram_bot.py
+   ```
+
+Notes:
+- `deepagents` is the CLI command only after installing the package. In this repository, use `python deploy/telegram_bot.py` to start the Telegram bot server.
+- Keep `.env` local and do not commit it.
+
 ## Deep Agents CLI
 
 <p align="center">

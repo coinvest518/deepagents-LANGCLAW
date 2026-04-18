@@ -187,6 +187,74 @@ def synthesize(text: str) -> bytes | None:
 # Convenience: is voice enabled?
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# NVIDIA Magpie TTS fallback (free tier via build.nvidia.com, 40 RPM)
+# ---------------------------------------------------------------------------
+
+_NVIDIA_KEY   = os.environ.get("NVIDIA_API_KEY", "")
+_NVIDIA_TTS_URL   = os.environ.get(
+    "NVIDIA_TTS_URL",
+    "https://integrate.api.nvidia.com/v1/audio/speech",
+)
+_NVIDIA_TTS_MODEL = os.environ.get("NVIDIA_TTS_MODEL", "nvidia/magpie-tts-multilingual")
+_NVIDIA_TTS_VOICE = os.environ.get("NVIDIA_TTS_VOICE", "Magpie-Multilingual.EN-US.Ray")
+
+
+def synthesize_nvidia(text: str) -> bytes | None:
+    """Synthesize speech via NVIDIA NIM Magpie TTS. Returns MP3 bytes or None."""
+    if not _NVIDIA_KEY or not text.strip():
+        return None
+    trimmed = text[:_MAX_CHARS]
+    try:
+        import httpx
+    except ImportError:
+        logger.warning("httpx not installed — cannot call NVIDIA TTS")
+        return None
+    payload = {
+        "model": _NVIDIA_TTS_MODEL,
+        "input": trimmed,
+        "voice": _NVIDIA_TTS_VOICE,
+        "response_format": "mp3",
+    }
+    headers = {
+        "Authorization": f"Bearer {_NVIDIA_KEY}",
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+    }
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(_NVIDIA_TTS_URL, json=payload, headers=headers)
+        if resp.status_code != 200:
+            logger.warning("NVIDIA TTS failed %s: %s", resp.status_code, resp.text[:200])
+            return None
+        data = resp.content
+        if not data or len(data) < 128:
+            logger.warning("NVIDIA TTS returned empty/short payload (%d bytes)", len(data or b""))
+            return None
+        logger.info("NVIDIA TTS synthesized %d chars (%d bytes MP3)", len(trimmed), len(data))
+        return data
+    except Exception as exc:
+        logger.warning("NVIDIA TTS call raised: %s", exc)
+        return None
+
+
+def synthesize_any(text: str) -> tuple[bytes, str] | None:
+    """Provider-fallback TTS. Tries ElevenLabs → NVIDIA Magpie.
+    Returns (audio_bytes, provider_name) or None if every provider failed.
+    The caller may then fall through to browser speechSynthesis."""
+    if not text.strip():
+        return None
+    # Tier 1: ElevenLabs (best quality, quota-limited)
+    audio = synthesize(text)
+    if audio:
+        return audio, "elevenlabs"
+    # Tier 2: NVIDIA Magpie (free, 40 RPM)
+    audio = synthesize_nvidia(text)
+    if audio:
+        return audio, "nvidia"
+    return None
+
+
 def tts_available() -> bool:
     """Return True if ElevenLabs is configured and has quota remaining."""
     return bool(_ELEVEN_KEY) and chars_remaining() > 20

@@ -1,5 +1,6 @@
 'use client'
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import LiveVoicePanel from './LiveVoicePanel'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -370,8 +371,11 @@ export default function ChatPanel() {
   const [showThinking, setShowThinking] = useState(true)
   const [streamingText, setStreamingText] = useState('')  // Accumulates during stream
   const [pendingAskUser, setPendingAskUser] = useState<any[] | null>(null)  // Questions from ask_user interrupt
+  const [liveVoice, setLiveVoice] = useState(false)
+  const [ttsLoading, setTtsLoading] = useState<number | null>(null)
   const threadId = useRef<string>('')
   const abortRef = useRef<AbortController | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
 
   useEffect(() => {
     // Always generate a fresh thread on mount — no stale context from previous sessions
@@ -410,32 +414,68 @@ export default function ChatPanel() {
     if (el) el.scrollTop = el.scrollHeight
   }, [messages, streamingText])
 
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        try { audioRef.current.pause() } catch {}
+        audioRef.current = null
+      }
+    }
+  }, [])
+
   // ------------------------------------------------------------------
-  // SSE streaming send
+  // playTts — per-message 🔊 button handler (single-shot playback).
+  // Live voice mode has its own audio pipeline in LiveVoicePanel.
   // ------------------------------------------------------------------
-  const send = useCallback(async () => {
-    const msg = input.trim()
-    if (!msg || loading) return
-    setInput('')
-    setPendingAskUser(null)  // clear any pending ask_user questions on every send
+  const playTts = useCallback(async (text: string, id: number) => {
+    if (!text) return
+    setTtsLoading(id)
+    try {
+      const res = await fetch('/api/agent-tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }))
+        throw new Error(err.error || res.statusText)
+      }
+      const ab = await res.arrayBuffer()
+      const url = URL.createObjectURL(new Blob([ab], { type: 'audio/mpeg' }))
+      if (audioRef.current) { try { audioRef.current.pause() } catch {} }
+      const audio = new Audio(url)
+      audioRef.current = audio
+      audio.onended = () => { URL.revokeObjectURL(url); audioRef.current = null; setTtsLoading(null) }
+      audio.onerror = () => { URL.revokeObjectURL(url); audioRef.current = null; setTtsLoading(null) }
+      await audio.play()
+    } catch (err: any) {
+      setMessages(prev => [...prev, { role: 'agent', text: `TTS error: ${err?.message || String(err)}`, ts: Date.now() }])
+      setTtsLoading(null)
+    }
+  }, [])
+
+  // ------------------------------------------------------------------
+  // Core streaming pipeline — shared by text send and voice transcript.
+  // Returns the final agent text so the caller can pipe it into TTS.
+  // ------------------------------------------------------------------
+  const streamAgent = useCallback(async (msg: string): Promise<string> => {
+    setPendingAskUser(null)
     setMessages(prev => [...prev, { role: 'user', text: msg, ts: Date.now() }])
     setLoading(true)
     setStreamingText('')
     setSpinnerLabel('Thinking')
 
     let timedOut = false
+    let finalText = ''
     try {
       const controller = new AbortController()
       abortRef.current = controller
-      const timeout = setTimeout(() => { timedOut = true; controller.abort() }, 300_000) // 5 min for complex tasks
+      const timeout = setTimeout(() => { timedOut = true; controller.abort() }, 300_000)
 
       const r = await fetch('/api/agent-chat-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: msg,
-          thread_id: threadId.current,
-        }),
+        body: JSON.stringify({ message: msg, thread_id: threadId.current }),
         signal: controller.signal,
       })
       clearTimeout(timeout)
@@ -443,155 +483,96 @@ export default function ChatPanel() {
       if (!r.ok) {
         const err = await r.json().catch(() => ({ error: r.statusText }))
         setMessages(prev => [...prev, { role: 'agent', text: `Error: ${err.error || r.statusText}`, ts: Date.now() }])
-        setLoading(false)
-        return
+        return ''
       }
 
-      // Parse SSE stream
       const reader = r.body?.getReader()
-      if (!reader) {
-        setMessages(prev => [...prev, { role: 'agent', text: 'No stream available', ts: Date.now() }])
-        setLoading(false)
-        return
-      }
+      if (!reader) return ''
 
       const decoder = new TextDecoder()
       let buffer = ''
       let accumulatedText = ''
       let gotDone = false
-      // These MUST be outside the while loop so SSE state survives chunk boundaries.
-      // If event: and data: arrive in different read() calls (common for large payloads),
-      // declaring them inside would reset currentEvent before data arrives → silent drop.
       let currentEvent = ''
       let currentData = ''
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
-
         buffer += decoder.decode(value, { stream: true })
-
-        // Parse SSE lines from buffer
         const lines = buffer.split('\n')
-        buffer = lines.pop() || ''  // Keep incomplete line in buffer
+        buffer = lines.pop() || ''
 
         for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            currentEvent = line.slice(7).trim()
-          } else if (line.startsWith('data: ')) {
-            currentData = line.slice(6)
-          } else if (line === '' && currentEvent && currentData) {
-            // Complete event — dispatch
+          if (line.startsWith('event: ')) currentEvent = line.slice(7).trim()
+          else if (line.startsWith('data: ')) currentData = line.slice(6)
+          else if (line === '' && currentEvent && currentData) {
             try {
               const payload = JSON.parse(currentData)
               switch (currentEvent) {
                 case 'status': {
                   const state = payload.state as string
-                  if (state === 'thinking') {
-                    setSpinnerLabel('Thinking')
-                  } else if (state?.startsWith('tool:')) {
-                    setSpinnerLabel(`Running ${state.slice(5)}`)
-                  } else if (state === 'interrupted') {
-                    // Agent is paused waiting for user input — stop spinner and unlock input
-                    setSpinnerLabel('Waiting for reply')
-                    setLoading(false)
-                  }
+                  if (state === 'thinking') setSpinnerLabel('Thinking')
+                  else if (state?.startsWith('tool:')) setSpinnerLabel(`Running ${state.slice(5)}`)
+                  else if (state === 'interrupted') { setSpinnerLabel('Waiting for reply'); setLoading(false) }
                   break
                 }
-
                 case 'text': {
-                  const chunk = payload.content as string
-                  accumulatedText += chunk
+                  accumulatedText += payload.content as string
                   setStreamingText(accumulatedText)
                   break
                 }
-
                 case 'tool_start': {
-                  // If the agent called ask_user, capture the questions for display
                   if (payload.name === 'ask_user') {
-                    const qs = payload.args?.questions || payload.args?.question
-                      ? [{ question: payload.args.question }]
-                      : []
-                    if (Array.isArray(payload.args?.questions)) {
-                      setPendingAskUser(payload.args.questions)
-                    } else if (qs.length) {
-                      setPendingAskUser(qs)
-                    }
+                    if (Array.isArray(payload.args?.questions)) setPendingAskUser(payload.args.questions)
+                    else if (payload.args?.question) setPendingAskUser([{ question: payload.args.question }])
                   }
                   if (showThinking) {
                     setMessages(prev => [...prev, {
                       role: 'tool',
                       text: `${payload.name}(${formatToolArgs(payload.args)})`,
                       ts: Date.now(),
-                      toolName: payload.name,
-                      toolArgs: payload.args,
-                      toolStatus: 'running',
-                      toolId: payload.id,
+                      toolName: payload.name, toolArgs: payload.args,
+                      toolStatus: 'running', toolId: payload.id,
                     }])
                   }
                   break
                 }
-
                 case 'tool_end': {
                   if (showThinking) {
-                    setMessages(prev => prev.map(m =>
-                      m.toolId === payload.id
-                        ? {
-                            ...m,
-                            toolStatus: payload.status as 'success' | 'error',
-                            toolOutput: payload.output,
-                          }
-                        : m
-                    ))
+                    setMessages(prev => prev.map(m => m.toolId === payload.id
+                      ? { ...m, toolStatus: payload.status, toolOutput: payload.output } : m))
                   }
                   break
                 }
-
                 case 'done': {
                   gotDone = true
-                  const finalText = accumulatedText.trim() || payload.response || 'No response'
+                  finalText = accumulatedText.trim() || payload.response || 'No response'
                   setStreamingText('')
-                  setMessages(prev => [...prev, {
-                    role: 'agent',
-                    text: finalText,
-                    ts: Date.now(),
-                  }])
+                  setMessages(prev => [...prev, { role: 'agent', text: finalText, ts: Date.now() }])
                   break
                 }
-
                 case 'error': {
                   setStreamingText('')
-                  setMessages(prev => [...prev, {
-                    role: 'agent',
-                    text: `Error: ${payload.message}`,
-                    ts: Date.now(),
-                  }])
+                  setMessages(prev => [...prev, { role: 'agent', text: `Error: ${payload.message}`, ts: Date.now() }])
                   break
                 }
               }
-            } catch {
-              // Skip malformed JSON
-            }
-            currentEvent = ''
-            currentData = ''
+            } catch {}
+            currentEvent = ''; currentData = ''
           }
         }
       }
 
-      // Only add if stream ended WITHOUT a 'done' event (e.g. connection dropped)
       if (!gotDone && accumulatedText.trim()) {
+        finalText = accumulatedText.trim()
         setStreamingText('')
-        setMessages(prev => [...prev, {
-          role: 'agent',
-          text: accumulatedText.trim(),
-          ts: Date.now(),
-        }])
+        setMessages(prev => [...prev, { role: 'agent', text: finalText, ts: Date.now() }])
       }
-
     } catch (e: any) {
       setStreamingText('')
       const errMsg = e.name === 'AbortError'
-        ? (timedOut ? 'Agent took too long (>5 min). Try again or check logs.' : 'Task stopped.')
+        ? (timedOut ? 'Agent took too long (>5 min).' : 'Task stopped.')
         : `Error: ${e.message}`
       setMessages(prev => [...prev, { role: 'agent', text: errMsg, ts: Date.now() }])
     } finally {
@@ -599,7 +580,18 @@ export default function ChatPanel() {
       setLoading(false)
       setStreamingText('')
     }
-  }, [input, loading, showThinking])
+    return finalText
+  }, [showThinking])
+
+  // ------------------------------------------------------------------
+  // send — text input path. Thin wrapper over streamAgent.
+  // ------------------------------------------------------------------
+  const send = useCallback(async () => {
+    const msg = input.trim()
+    if (!msg || loading) return
+    setInput('')
+    await streamAgent(msg)
+  }, [input, loading, streamAgent])
 
 
   const stopTask = useCallback(() => {
@@ -652,6 +644,13 @@ export default function ChatPanel() {
         </button>
       </div>
 
+      {liveVoice ? (
+        <LiveVoicePanel
+          streamAgent={streamAgent}
+          onExit={() => setLiveVoice(false)}
+        />
+      ) : (
+      <>
       {/* Messages */}
       <div ref={messagesContainerRef} className="flex-1 overflow-y-auto space-y-3 min-h-0 pr-1 scrollbar-thin">
         {messages.length === 0 && !loading && (
@@ -682,7 +681,19 @@ export default function ChatPanel() {
                 {m.role === 'user' ? 'YOU' : 'AGENT'} · {new Date(m.ts).toLocaleTimeString()}
               </div>
               {m.role === 'agent' ? (
-                <div className="text-[13.5px] leading-[1.7]"><FormatAgentText text={m.text} /></div>
+                <div className="text-[13.5px] leading-[1.7]">
+                  <div className="flex gap-3 items-start">
+                    <div className="flex-1"><FormatAgentText text={m.text} /></div>
+                    <button
+                      onClick={() => playTts(m.text, m.ts)}
+                      disabled={ttsLoading !== null && ttsLoading !== m.ts}
+                      className="ml-2 px-2 py-1 text-[12px] border rounded text-hud-text/60 border-hud-border/30 hover:bg-hud-cyan/5 disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Play voice"
+                    >
+                      {ttsLoading === m.ts ? '🔊…' : '🔊'}
+                    </button>
+                  </div>
+                </div>
               ) : (
                 <div className="whitespace-pre-wrap leading-relaxed text-[13px]">{m.text}</div>
               )}
@@ -714,43 +725,66 @@ export default function ChatPanel() {
 
       {/* Input */}
       <div className="mt-3 pt-3 border-t border-hud-border/30">
-        <div className="flex gap-2">
-        {pendingAskUser && <AskUserPanel questions={pendingAskUser} />}
-        <input
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
-          placeholder={
-            status === 'offline'
-              ? 'Agent offline — start local server or check AGENT_API_URL'
-              : pendingAskUser
-              ? 'Type your answer here and press Enter…'
-              : loading
-              ? 'Agent is working…'
-              : 'Send a message or task…'
-          }
-          disabled={status === 'offline' || (loading && !pendingAskUser)}
-          className="flex-1 bg-[#0a1628] border border-hud-border/60 rounded-lg px-4 py-3 text-[13px] text-hud-text placeholder-hud-text/30 focus:outline-none focus:border-hud-cyan/50 focus:ring-1 focus:ring-hud-cyan/20 disabled:opacity-40 transition-colors"
-        />
-        {loading ? (
-          <button
-            onClick={stopTask}
-            className="px-4 py-3 text-[11px] border border-red-500/60 text-red-400 rounded-lg hover:bg-red-500/10 transition-colors tracking-widest font-medium"
-            title="Stop the current task"
-          >
-            STOP
-          </button>
-        ) : (
-          <button
-            onClick={send}
-            disabled={!input.trim() || status === 'offline'}
-            className="px-5 py-3 text-[11px] border border-hud-cyan/40 text-hud-cyan rounded-lg hover:bg-hud-cyan/10 transition-colors disabled:opacity-30 tracking-widest font-medium"
-          >
-            SEND
-          </button>
-        )}
+        <div className="flex flex-col gap-2">
+          <div className="flex gap-2 items-end">
+            {pendingAskUser && <AskUserPanel questions={pendingAskUser} />}
+            <input
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
+              placeholder={
+                status === 'offline'
+                  ? 'Agent offline — start local server or check AGENT_API_URL'
+                  : pendingAskUser
+                  ? 'Type your answer here and press Enter…'
+                  : loading
+                  ? 'Agent is working…'
+                  : 'Send a message or task…'
+              }
+              disabled={status === 'offline' || (loading && !pendingAskUser)}
+              className="flex-1 bg-[#0a1628] border border-hud-border/60 rounded-lg px-4 py-3 text-[13px] text-hud-text placeholder-hud-text/30 focus:outline-none focus:border-hud-cyan/50 focus:ring-1 focus:ring-hud-cyan/20 disabled:opacity-40 transition-colors"
+            />
+            <button
+              onClick={async () => {
+                // Request mic permission BEFORE mounting the voice panel.
+                // Web Speech API silently fails if permission isn't primed
+                // by an explicit user-gesture getUserMedia call.
+                try {
+                  const s = await navigator.mediaDevices.getUserMedia({ audio: true })
+                  s.getTracks().forEach(t => t.stop())
+                  setLiveVoice(true)
+                } catch (e: any) {
+                  alert('Microphone permission denied: ' + (e?.message || e))
+                }
+              }}
+              disabled={status === 'offline' || loading}
+              className="px-4 py-3 text-[11px] border border-hud-cyan/40 text-hud-cyan rounded-lg hover:bg-hud-cyan/10 transition-colors disabled:opacity-30 tracking-widest font-medium"
+              title="Start live voice chat with the agent"
+            >
+              🎙 VOICE
+            </button>
+            {loading ? (
+              <button
+                onClick={stopTask}
+                className="px-4 py-3 text-[11px] border border-red-500/60 text-red-400 rounded-lg hover:bg-red-500/10 transition-colors tracking-widest font-medium"
+                title="Stop the current task"
+              >
+                STOP
+              </button>
+            ) : (
+              <button
+                onClick={send}
+                disabled={!input.trim() || status === 'offline'}
+                className="px-5 py-3 text-[11px] border border-hud-cyan/40 text-hud-cyan rounded-lg hover:bg-hud-cyan/10 transition-colors disabled:opacity-30 tracking-widest font-medium"
+              >
+                SEND
+              </button>
+            )}
+          </div>
         </div>
       </div>
+      </>
+      )}
     </div>
   )
 }
